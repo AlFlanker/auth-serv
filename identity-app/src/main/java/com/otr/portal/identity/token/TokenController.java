@@ -5,15 +5,15 @@ import com.otr.portal.oss.exception.ProfileNotFoundException;
 import com.otr.portal.oss.model.Profile;
 import com.otr.portal.oss.userdetails.ProfileService;
 import com.otr.portal.token.TokenClaims;
-import com.otr.portal.token.TokenProperties;
 import com.otr.portal.token.TokenService;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.CacheControl;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.oauth2.jwt.BadJwtException;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
-import org.springframework.security.oauth2.jwt.JwtException;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
@@ -22,13 +22,6 @@ import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
-import java.util.List;
-
-/**
- * Эндпоинты токенов: выпуск (SSO-заголовок или локальный логин/пароль),
- * продление/перевыпуск (exchange) и logout (отзыв jti).
- */
-@Slf4j
 @RestController
 @RequiredArgsConstructor
 public class TokenController {
@@ -42,128 +35,112 @@ public class TokenController {
     private final TokenService tokenService;
     private final TokenRegistry tokenRegistry;
     private final JwtDecoder jwtDecoder;
-    private final TokenProperties tokenProperties;
+    private final AuthenticationProperties authentication;
 
-    /**
-     * POST /api/v1/token — выпуск access-токена.
-     * Приоритет: SSO-заголовок (прод-механизм), затем локальный логин/пароль.
-     */
     @PostMapping("/api/v1/token")
     public Mono<ResponseEntity<TokenView>> token(ServerWebExchange exchange,
                                                  @RequestBody(required = false) TokenRequest body) {
         return ssoPrincipalExtractor.extract(exchange)
-                .flatMap(this::issueFromSso)
-                .switchIfEmpty(Mono.defer(() -> issueFromPassword(body)))
-                .map(token -> ResponseEntity.ok(
-                        new TokenView(token, "Bearer", tokenProperties.ttl().toSeconds())));
+                .flatMap(principal -> loadSsoClaims(principal.login(), principal.headerName())
+                        .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED))))
+                .switchIfEmpty(Mono.defer(() -> authenticatePassword(body)))
+                .flatMap(tokenService::issue)
+                .flatMap(issued -> tokenRegistry.register(issued.jti(), issued.expiresAt()).thenReturn(issued))
+                .map(this::tokenResponse);
     }
 
-    /**
-     * POST /api/internal/token/exchange — перевыпуск токена с перечитыванием ролей
-     * (замена sliding-продления монолита; отозванные токены не перевыпускаются).
-     */
     @PostMapping("/api/internal/token/exchange")
     public Mono<ResponseEntity<TokenView>> exchange(ServerWebExchange exchange) {
-        return bearerToken(exchange)
-                .flatMap(token -> decode(token)
-                        .flatMap(jwt -> tokenRegistry.isRevoked(jwt.getId())
-                                .flatMap(revoked -> revoked
-                                        ? unauthorizedToken()
-                                        : reissue(jwt))))
-                .switchIfEmpty(unauthorizedToken());
+        return authenticatedBearer(exchange)
+                .filterWhen(jwt -> tokenRegistry.isActive(jwt.getId()))
+                .flatMap(jwt -> refreshClaims(jwt)
+                        .flatMap(claims -> tokenService.reissue(claims, jwt))
+                        .filterWhen(issued -> tokenRegistry.exchange(jwt.getId(), issued.jti(), issued.expiresAt())))
+                .map(this::tokenResponse)
+                .onErrorResume(BadJwtException.class, ignored -> Mono.empty())
+                .switchIfEmpty(Mono.just(unauthorizedBearer()));
     }
 
-    /**
-     * POST /api/v1/logout — отзыв текущего токена (jti в реестр).
-     */
     @PostMapping("/api/v1/logout")
     public Mono<ResponseEntity<Void>> logout(ServerWebExchange exchange) {
-        Mono<ResponseEntity<Void>> unauthorized =
-                Mono.just(new ResponseEntity<>(HttpStatus.UNAUTHORIZED));
-        return bearerToken(exchange)
-                .flatMap(token -> decode(token)
-                        .flatMap(jwt -> tokenRegistry.revoke(jwt.getId())
-                                .thenReturn(new ResponseEntity<Void>(HttpStatus.NO_CONTENT))))
-                .switchIfEmpty(unauthorized);
+        return authenticatedBearer(exchange)
+                .flatMap(jwt -> tokenRegistry.revoke(jwt.getId()).thenReturn(ResponseEntity.noContent().<Void>build()))
+                .switchIfEmpty(Mono.just(unauthorizedBearer()));
     }
 
-    private Mono<String> issueFromSso(SsoPrincipalExtractor.SsoPrincipal principal) {
-        log.info("Выпуск токена по SSO-заголовку '{}' для пользователя '{}'", principal.headerName(), principal.login());
-        return profileService.load(principal.login())
-                .map(profile -> toClaims(profile, principal.headerName()))
-                .flatMap(tokenService::mint);
-    }
-
-    private Mono<String> issueFromPassword(TokenRequest body) {
+    private Mono<TokenClaims> authenticatePassword(TokenRequest body) {
+        if (!authentication.localPasswordEnabled()) {
+            return Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED));
+        }
         if (body == null || body.username() == null || body.password() == null) {
             return Mono.error(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Не заданы логин/пароль"));
         }
         return Mono.fromCallable(() -> localUserService.verify(body.username(), body.password()))
                 .subscribeOn(Schedulers.boundedElastic())
-                // verify возвращает null для неверных учётных данных — fromCallable превращает null в empty
-                .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED,
-                        "Неверный логин или пароль")))
-                .flatMap(roles -> {
-                    log.info("Выпуск токена по логину/паролю для локального пользователя '{}'", body.username());
-                    return tokenService.mint(new TokenClaims(
-                            body.username(), roles, null, null, AUTH_SOURCE_PASSWORD));
-                });
+                .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED)))
+                .map(roles -> new TokenClaims(body.username(), roles, null, null, AUTH_SOURCE_PASSWORD));
     }
 
-    private Mono<ResponseEntity<TokenView>> reissue(Jwt jwt) {
-        var username = jwt.getSubject();
-        var authSource = jwt.getClaimAsString("auth_source");
-        var orgGuid = jwt.getClaimAsString("org_guid");
-        var orgCode = jwt.getClaimAsString("org_code");
+    private Mono<TokenClaims> refreshClaims(Jwt jwt) {
+        String username = jwt.getSubject();
+        String source = jwt.getClaimAsString("auth_source");
+        if (AUTH_SOURCE_PASSWORD.equals(source)) {
+            if (!authentication.localPasswordEnabled()) {
+                return Mono.empty();
+            }
+            return Mono.fromCallable(() -> localUserService.authorities(username))
+                    .subscribeOn(Schedulers.boundedElastic())
+                    .map(roles -> new TokenClaims(username, roles, null, null, source));
+        }
+        return loadSsoClaims(username, source);
+    }
 
-        // роли перечитываются заново: профиль из ОШС/ЮСБ, fallback — локальные пользователи
-        return profileService.getUserAuthorities(username)
-                .onErrorResume(ProfileNotFoundException.class, e -> Mono.just(List.of()))
-                .flatMap(profileRoles -> {
-                    Mono<List<String>> roles = !profileRoles.isEmpty()
-                            ? Mono.just(profileRoles)
-                            : Mono.fromCallable(() -> localUserService.authorities(username))
-                                    .subscribeOn(Schedulers.boundedElastic());
-                    return roles
-                            .flatMap(resolved -> tokenService.mint(
-                                    new TokenClaims(username, resolved, orgGuid, orgCode, authSource)))
-                            .map(token -> ResponseEntity.ok(
-                                    new TokenView(token, "Bearer", tokenProperties.ttl().toSeconds())));
-                });
+    private Mono<TokenClaims> loadSsoClaims(String username, String source) {
+        return profileService.loadWithoutCache(username)
+                .filter(profile -> username.equals(profile.login()))
+                .map(profile -> toClaims(profile, source))
+                .onErrorResume(ProfileNotFoundException.class, ignored -> Mono.empty());
     }
 
     private TokenClaims toClaims(Profile profile, String authSource) {
-        return new TokenClaims(
-                profile.login(),
-                profile.roles(),
-                profile.activeOrgGuid(),
-                profile.activeOrgCode(),
-                authSource);
+        return new TokenClaims(profile.login(), profile.roles(), profile.activeOrgGuid(), profile.activeOrgCode(), authSource);
     }
 
-    private Mono<String> bearerToken(ServerWebExchange exchange) {
-        var authorization = exchange.getRequest().getHeaders().getFirst("Authorization");
-        if (authorization == null || !authorization.startsWith(BEARER_PREFIX)) {
+    private Mono<Jwt> authenticatedBearer(ServerWebExchange exchange) {
+        var headers = exchange.getRequest().getHeaders().get(HttpHeaders.AUTHORIZATION);
+        if (headers == null || headers.size() != 1) {
             return Mono.empty();
         }
-        return Mono.just(authorization.substring(BEARER_PREFIX.length()));
-    }
-
-    private Mono<Jwt> decode(String token) {
-        try {
-            return Mono.just(jwtDecoder.decode(token));
-        } catch (JwtException e) {
+        String authorization = headers.getFirst();
+        if (!authorization.regionMatches(true, 0, BEARER_PREFIX, 0, BEARER_PREFIX.length())
+                || authorization.length() <= BEARER_PREFIX.length()) {
             return Mono.empty();
         }
+        return Mono.fromCallable(() -> jwtDecoder.decode(authorization.substring(BEARER_PREFIX.length())))
+                .subscribeOn(Schedulers.boundedElastic())
+                .onErrorResume(BadJwtException.class, ignored -> Mono.empty());
     }
 
-    private Mono<ResponseEntity<TokenView>> unauthorizedToken() {
-        return Mono.just(ResponseEntity.status(HttpStatus.UNAUTHORIZED).build());
+    private ResponseEntity<TokenView> tokenResponse(TokenService.IssuedToken token) {
+        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).header(HttpHeaders.PRAGMA, "no-cache")
+                .body(new TokenView(token.value(), "Bearer", token.expiresInSeconds()));
+    }
+
+    private <T> ResponseEntity<T> unauthorizedBearer() {
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).header(HttpHeaders.WWW_AUTHENTICATE, "Bearer").build();
     }
 
     public record TokenRequest(String username, String password) {
+        @Override
+        public String toString() {
+            return "TokenRequest[redacted]";
+        }
     }
 
     public record TokenView(String accessToken, String tokenType, long expiresInSeconds) {
+        @Override
+        public String toString() {
+            return "TokenView[redacted]";
+        }
     }
 }

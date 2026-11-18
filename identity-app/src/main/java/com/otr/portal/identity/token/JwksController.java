@@ -1,24 +1,33 @@
 package com.otr.portal.identity.token;
 
 import com.otr.portal.token.JwtKeyProvider;
-import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.CacheControl;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
-import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.Map;
 
-/**
- * Публичные ключи подписи JWT для portal-edge и других сервисов.
- */
+/** Публичные ключи подписи для portal-edge и других потребителей. */
 @RestController
-@RequiredArgsConstructor
 public class JwksController {
 
-    private final JwtKeyProvider jwtKeyProvider;
+    private final Map<String, Object> publicKeys;
+    private final CacheControl cacheControl;
+
+    public JwksController(JwtKeyProvider provider,
+                          @Value("${identity.token.jwks-cache-ttl:5m}") Duration cacheTtl) {
+        if (cacheTtl.isNegative()) {
+            throw new IllegalArgumentException("identity.token.jwks-cache-ttl должен быть >= 0");
+        }
+        publicKeys = provider.publicJwkSet().toJSONObject();
+        cacheControl = CacheControl.maxAge(cacheTtl).cachePublic().mustRevalidate();
+    }
 
     @GetMapping("/.well-known/jwks.json")
-    public Mono<Map<String, Object>> jwks() {
-        return Mono.fromCallable(() -> jwtKeyProvider.publicJwkSet().toJSONObject());
+    public ResponseEntity<Map<String, Object>> jwks() {
+        return ResponseEntity.ok().cacheControl(cacheControl).body(publicKeys);
     }
 }

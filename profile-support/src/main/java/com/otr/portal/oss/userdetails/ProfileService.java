@@ -81,7 +81,13 @@ public class ProfileService {
      * Загружает профиль пользователя (с кэшем).
      */
     public Mono<Profile> load(String username) {
-        return Mono.defer(() -> Mono.fromFuture(cache.get(username)));
+        return Mono.defer(() -> {
+            var currentCache = cache;
+            var pending = currentCache.get(username);
+            // При повторном запросе после ошибки загружаем профиль заново.
+            return Mono.fromFuture(pending, true)
+                    .doOnError(error -> currentCache.asMap().remove(username, pending));
+        });
     }
 
     /**
@@ -155,11 +161,12 @@ public class ProfileService {
         return config()
                 .flatMap(cfg -> Mono.zip(
                                 commandFactory.buildCommand(GetUserDetailsRequest.from(username))
-                                        .flatMap(Command::execute),
+                                        .flatMap(Command::execute)
+                                        .switchIfEmpty(Mono.error(() -> new ProfileNotFoundException(username))),
                                 loadAuthorities(username, cfg))
                         .map(tuple -> toProfile(tuple.getT1(), tuple.getT2(), username, cfg)))
-                .doOnSuccess(profile -> eventPublisher.publishEvent(new ProfileLoadedEvent(profile)))
-                .doOnSuccess(profile -> log.trace("Получен пользователь из {}: [{}]", profile.login(), username));
+                .doOnNext(profile -> eventPublisher.publishEvent(new ProfileLoadedEvent(profile)))
+                .doOnNext(profile -> log.trace("Получен пользователь из {}: [{}]", profile.login(), username));
     }
 
     private Mono<List<String>> loadAuthorities(String username, OssConfig cfg) {

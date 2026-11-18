@@ -73,7 +73,8 @@ public class ConfigKeysWatcher implements SmartLifecycle {
                     ConnectableFlux<ConfigChange> updates = configSource.watchKey(key).replay(1);
                     Disposable connection = updates.connect();
                     return configSource.get(key)
-                            .doOnNext(value -> logLoaded(key, value))
+                            .doOnNext(value -> log.info("Конфигурация '{}' загружена: {}",
+                                    key.key(), key.type().getSimpleName()))
                             .switchIfEmpty(Mono.fromRunnable(() ->
                                     log.warn("Ключ '{}' отсутствует в источнике конфигурации", key.key())))
                             .thenMany(updates)
@@ -84,8 +85,8 @@ public class ConfigKeysWatcher implements SmartLifecycle {
                 .retryWhen(Retry.backoff(Long.MAX_VALUE, RETRY_BACKOFF)
                         .maxBackoff(RETRY_MAX_BACKOFF)
                         .doBeforeRetry(signal -> log.warn(
-                                "Слежение за ключом '{}' оборвано, переподписка (попытка {})",
-                                key.key(), signal.totalRetries() + 1, signal.failure())))
+                                "Слежение за ключом '{}' оборвано ({}), переподписка (попытка {})",
+                                key.key(), signal.failure().getClass().getSimpleName(), signal.totalRetries() + 1)))
                 .subscribe(
                         change -> {
                             switch (change.type()) {
@@ -96,13 +97,9 @@ public class ConfigKeysWatcher implements SmartLifecycle {
                                 default -> log.trace("Игнорируем событие '{}'", change.type());
                             }
                         },
-                        error -> log.error("Слежение за ключом '{}' остановлено окончательно", key.key(), error)
+                        error -> log.error("Слежение за ключом '{}' остановлено окончательно ({})",
+                                key.key(), error.getClass().getSimpleName())
                 );
-    }
-
-    private void logLoaded(ConfigKey<?> key, Object value) {
-        log.info("Конфигурация '{}' загружена: {}", key.key(), value.getClass().getSimpleName());
-        log.debug("Конфигурация '{}': {}", key.key(), value);
     }
 
     private void publishConfigurationChangedEvent(String key) {

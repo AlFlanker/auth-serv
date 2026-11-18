@@ -63,11 +63,20 @@ logging:
 # =============================================================================
 identity:
   internal:
-    api-key: change-me                                   # Общий ключ внутреннего API (заголовок X-Internal-Key); в проде — секрет
+    api-key: ${IDENTITY_INTERNAL_API_KEY:}                # При пустом ключе внутренний API закрыт
   token:
     ttl: 30m                                             # Время жизни access-токена
     issuer: https://identity-service                     # iss (URL-форма)
-    key-id: identity-1                                   # kid ключа подписи (ротация ключей — позже)
+    key-id: identity-1                                   # Уникальный kid активного ключа
+    audiences: [portal-edge]
+    clock-skew: 30s
+    max-session-lifetime: 8h
+    jwks-cache-ttl: 5m
+    keys:
+      ephemeral: false                                   # Для запуска укажите путь keys.private-key
+  auth:
+    local-password-enabled: false
+    sso-cookie-enabled: false
 
 admin:
   security:

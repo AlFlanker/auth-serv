@@ -4,11 +4,12 @@ import com.otr.portal.config.source.ConfigKey;
 import com.otr.portal.config.source.ConfigSource;
 import com.otr.portal.oss.config.OssConfig;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 
-import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -24,6 +25,7 @@ public class SsoPrincipalExtractor {
 
     private final ConfigSource configSource;
     private final ConfigKey<OssConfig> ossConfigKey;
+    private final AuthenticationProperties authentication;
 
     /**
      * @return логин пользователя или {@link Mono#empty()}, если SSO-заголовок отсутствует
@@ -35,15 +37,26 @@ public class SsoPrincipalExtractor {
                     if (headerName == null || headerName.isBlank()) {
                         return Mono.empty();
                     }
+                    if (TokenController.AUTH_SOURCE_PASSWORD.equalsIgnoreCase(headerName)) {
+                        return Mono.error(new IllegalStateException("Имя SSO-заголовка зарезервировано"));
+                    }
                     var request = exchange.getRequest();
+                    var headers = request.getHeaders().get(headerName);
+                    if (headers != null && headers.size() > 1) {
+                        return Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED));
+                    }
                     var value = request.getHeaders().getFirst(headerName);
-                    if (value == null || value.isBlank()) {
+                    if ((value == null || value.isBlank()) && authentication.ssoCookieEnabled()) {
                         value = readCookie(request.getCookies(), headerName);
                     }
                     if (value == null || value.isBlank()) {
                         return Mono.empty();
                     }
-                    return Mono.just(new SsoPrincipal(dropServiceSuffix(value), headerName));
+                    String login = dropServiceSuffix(value);
+                    if (login.isBlank() || login.contains(",")) {
+                        return Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED));
+                    }
+                    return Mono.just(new SsoPrincipal(login, headerName));
                 });
     }
 

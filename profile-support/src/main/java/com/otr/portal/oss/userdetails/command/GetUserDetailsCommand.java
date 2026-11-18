@@ -52,7 +52,7 @@ public class GetUserDetailsCommand extends AbstractResilienceCommand<GetUserInfo
         final GetUserInfoRequest userRequest = new GetUserInfoRequest();
         userRequest.setLogin(this.username);
         return ossConnection.getUserInfoV1(userRequest)
-                .doOnSuccess(GetUserDetailsCommand::logResponse);
+                .doOnNext(GetUserDetailsCommand::logResponse);
     }
 
     @Override
