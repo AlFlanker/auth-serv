@@ -64,7 +64,8 @@ java -jar identity-app\build\libs\identity-app-0.0.1-SNAPSHOT.jar
 | Свойство | Назначение |
 |---|---|
 | `server.port` | Порт (по умолчанию 8091) |
-| `identity.internal.api-key` | Секрет для `X-Internal-Key`, обязателен для доступа ко всем внутренним методам, включая exchange |
+| `identity.internal.require-api-key` | По умолчанию `true`. Для переходного режима задайте `IDENTITY_INTERNAL_REQUIRE_API_KEY=false`, чтобы отключить проверку заголовка `X-Internal-Key` для `/api/internal/**` |
+| `identity.internal.api-key` | Секрет для `X-Internal-Key`. При включённой проверке пустое значение закрывает доступ к внутреннему API |
 | `identity.token.ttl` / `max-session-lifetime` | Время жизни одного JWT (30 мин) и предел цепочки обменов от первичной выдачи (8 ч) |
 | `identity.token.issuer` / `audiences` | Точный URL издателя и список получателей (по умолчанию `https://identity-service` и `[portal-edge]`) |
 | `identity.token.clock-skew` / `jwks-cache-ttl` | Допуск на расхождение часов (30 с) и срок HTTP-кэширования JWKS (5 мин) |
@@ -91,13 +92,16 @@ Prometheus получает метрики по `/actuator/prometheus`. Чтоб
 | Метод/путь | Назначение |
 |---|---|
 | `POST /api/v1/token` | Выпуск JWT по доверенному SSO-заголовку (`OSSConfig.headerName`, обработка суффикса `^M`). Опционально — вход по `{username,password}` или через SSO-cookie |
-| `POST /api/internal/token/exchange` | Однократный обмен действующего токена с перечитыванием прав (`Authorization: Bearer <jwt>` и `X-Internal-Key`) |
+| `POST /api/internal/token/exchange` | Однократный обмен с перечитыванием прав. Требуется `Authorization: Bearer <jwt>` |
 | `POST /api/v1/logout` | Отзыв предъявленного Bearer JWT по его `jti`; успешный ответ HTTP 204 |
 | `GET /.well-known/jwks.json` | Публичные ключи подписи (JWKS) |
-| `POST /api/internal/v1/users/{login}/profile` | Профиль + роли + организации (внутренний API, заголовок `X-Internal-Key`) |
+| `POST /api/internal/v1/users/{login}/profile` | Профиль, роли и организации пользователя (внутренний API) |
 | `POST /api/internal/v1/users/{login}/groups` | Роли пользователя (внутренний API) |
 | `POST /api/internal/v1/users/{login}/custom-attributes` | Редактирование кастомных полей (внутренний API, ОШС) |
+| `POST /api/internal/v1/users/organizations/{login}` | Организации пользователя (внутренний API) |
 | `GET /roles`, `GET /roles/{id}` | Локальные роли |
+
+Ограничьте сетевой доступ к внутренним методам профиля, групп, организаций и изменения атрибутов доверенными сервисами. При отключённой проверке общего ключа эти методы принимают запросы любого клиента, имеющего к ним сетевой доступ. Для обмена токена действующий Bearer JWT обязателен в обоих режимах.
 
 ### Жизненный цикл JWT
 

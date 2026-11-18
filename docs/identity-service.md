@@ -115,7 +115,7 @@
 
 - `GET /.well-known/jwks.json` — публичные ключи для portal-edge и nav-composer;
 - `POST /api/v1/token` — первичная выдача JWT по идентификатору, подтверждённому внешним SSO. В текущем контракте идентификатор — канонический логин;
-- `POST /api/internal/token/exchange` — однократный обмен зарегистрированного действующего Bearer JWT с перечитыванием прав. Запрос требует `X-Internal-Key`;
+- `POST /api/internal/token/exchange` — однократный обмен зарегистрированного действующего Bearer JWT с перечитыванием прав. По умолчанию также требуется `X-Internal-Key`.
 - `POST /api/v1/logout` — отзыв предъявленного Bearer JWT. Выданный ранее преемник и другие токены пользователя сохраняют собственный срок действия;
 - админ-API локальных пользователей и ролей для portal-app (`UsersController`, `RolesController`, `UserRoleService`, `UserService`) — админ-UI остаётся в portal-app, данные уходят в identity-service;
 - канал аудита: события входов/выпуска токенов для админ-контура аудита portal-app (`AdminAuditEventMapper`, server-audit) — kafka/rabbit/API.
@@ -138,7 +138,7 @@
 
 - M0: каркас, сборка и тесты зелёные;
 - M1: конфиги из etcd — `OSSConfig`/`UsbConfig` (subset полей), watch + события изменения, сброс кэшей;
-- M2: ядро профиля — `OssConnection` (SOAP СОБИ через soap-client + WSDL-resolver, REST USS v1/v2, перепаковка в формат ОШС), команды с Resilience4j, `ProfileService` (реактивный, Caffeine-кэш, автовыбор единственной организации), внутренний API `/api/internal/v1/users/...` (защита `X-Internal-Key`);
+- M2: ядро профиля — `OssConnection` (SOAP СОБИ через soap-client + WSDL-resolver, REST USS v1/v2, перепаковка в формат ОШС), команды с Resilience4j, `ProfileService` (реактивный, Caffeine-кэш, автовыбор единственной организации), внутренний API `/api/internal/v1/users/...` (`X-Internal-Key` по умолчанию);
 - M3: локальные админы (`user/123`, `user2/1234`, BCrypt) и роли (PostgreSQL, H2 в тестах), `GET /roles`, `/roles/{id}`;
 - M4: JWT — RS256, ключ при старте (kid `identity-1`), `/api/v1/token` (SSO-заголовок с cookie-fallback и `^M`, либо локальный логин/пароль), `/api/internal/token/exchange` (перечитывание ролей, проверка отзыва), `/api/v1/logout` (реестр jti в БД), `/.well-known/jwks.json`; claims: `sub`, `username`, `roles[]`, `org_guid`, `org_code`, `auth_source`.
 
@@ -153,11 +153,15 @@
 
 ### 2. «Прослойка» между монолитом и ОШС/ЮСБ — внутренний API (без JWT)
 
-`POST /api/internal/v1/users/{login}/...`, защита заголовком `X-Internal-Key`:
+По умолчанию `identity.internal.require-api-key=true` и сервис проверяет `X-Internal-Key` на всех маршрутах `/api/internal/**`. В переходном режиме `IDENTITY_INTERNAL_REQUIRE_API_KEY=false` отключает эту проверку. Сетевой доступ к методам профиля, групп, организаций и изменения атрибутов должен быть ограничен доверенными сервисами.
+
+Методы `POST /api/internal/v1/users/{login}/...` принимают логин в пути.
 
 - `/profile` — профиль + роли + организации (агрегация userInfo + groups);
 - `/groups` — роли пользователя;
 - `/custom-attributes` — редактирование кастомных полей. При получении SOAP-ответа `SimpleResponse` сервис сбрасывает профиль из кэша и отвечает HTTP 204. Для ЮСБ API возвращает 501, при тайм-ауте источника — 504, при SOAP Fault или пустом ответе — 503. Значения поля `SimpleResponse.result` требуют подтверждения по контракту СОБИ в dev-контуре.
+
+Список организаций доступен по `POST /api/internal/v1/users/organizations/{login}`.
 
 Источники: СОБИ SOAP (JAXB-контракт `fk-services-sobi`, WSDL-resolver для endpoint/SOAPAction с fallback как в монолите), USS REST v1/v2 (перепаковка в формат ОШС, включая админские роли из групп), СОБИ REST — заглушка. На каждый вызов — Resilience4j (таймауты/конкурентность из конфига); Caffeine-кэш профилей с метриками; автовыбор организации, если она одна; пустые группы → `ROLE_UNDEFINED` (поведение монолита сохранено).
 
@@ -172,7 +176,7 @@
 
 - Постоянный RSA-ключ загружается из PKCS#8 PEM. Набор открытых ключей поддерживает период перекрытия при ротации.
 - `POST /api/v1/token` выпускает access-токен по доверенному SSO-заголовку. Вход с локальным паролем и SSO-cookie включаются отдельно.
-- `POST /api/internal/token/exchange` однократно обменивает действующий токен с перечитыванием прав. Цепочка обменов ограничена временем от первичной выдачи токена порталом.
+- `POST /api/internal/token/exchange` требует действующий Bearer JWT при любом значении `identity.internal.require-api-key` и однократно обменивает его с перечитыванием прав. Цепочка обменов ограничена временем от первичной выдачи токена порталом.
 - `POST /api/v1/logout` отзывает предъявленный токен для дальнейшего обмена. При автономной проверке в portal-edge действует TTL токена.
 - `GET /.well-known/jwks.json` публикует активный и дополнительные открытые ключи с настраиваемым сроком кэширования.
 
@@ -180,7 +184,7 @@
 
 ### Осознанные ограничения (что пока НЕ умеет)
 
-- нет rate-limiting на `/api/v1/token`; внутренний API защищён общим ключом (мTLS позже);
+- нет rate-limiting на `/api/v1/token`; для внутреннего API по умолчанию включена проверка общего ключа, в дальнейшем запланирован mTLS;
 - нет хранения выбранной организации для мультиорганизационных пользователей (в токен попадает только автовыбранная единственная);
 - нет публичных профильных эндпоинтов (`/user/current/profile*`) и интеграции с монолитом через feature-toggle — следующий шаг;
 - не прогнан против реальных ОШС/ЮСБ в dev-контуре (тесты — WireMock/моки); Docker-образ и CI подготовлены, но не запускались.

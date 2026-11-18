@@ -18,7 +18,7 @@ import java.util.Map;
 /**
  * Внутренний API профиля — контур будущей интеграции с монолитом fk-portal
  * («прослойка между монолитом и USS/OSS», без JWT).
- * Защищён {@link com.otr.portal.identity.api.internal.InternalApiKeyWebFilter}.
+ * Проверкой общего ключа управляет свойство {@code identity.internal.require-api-key}.
  */
 @RestController
 @RequestMapping("/api/internal/v1/users")

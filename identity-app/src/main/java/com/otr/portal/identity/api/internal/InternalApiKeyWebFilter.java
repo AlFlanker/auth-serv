@@ -26,16 +26,19 @@ public class InternalApiKeyWebFilter implements WebFilter {
 
     private static final PathPattern INTERNAL = PathPatternParser.defaultInstance.parse("/api/internal/**");
 
+    private final boolean requireApiKey;
     private final byte[] apiKey;
 
-    public InternalApiKeyWebFilter(@Value("${identity.internal.api-key:}") String apiKey) {
+    public InternalApiKeyWebFilter(@Value("${identity.internal.require-api-key:true}") boolean requireApiKey,
+                                   @Value("${identity.internal.api-key:}") String apiKey) {
+        this.requireApiKey = requireApiKey;
         this.apiKey = hasText(apiKey) ? apiKey.getBytes(StandardCharsets.UTF_8) : null;
     }
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
         var request = exchange.getRequest();
-        if (!INTERNAL.matches(request.getPath().pathWithinApplication())) {
+        if (!requireApiKey || !INTERNAL.matches(request.getPath().pathWithinApplication())) {
             return chain.filter(exchange);
         }
         if (apiKey == null) {
