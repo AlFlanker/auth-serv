@@ -123,13 +123,15 @@ class CustomAttributesIntegrationTest {
     }
 
     private void loadProfile() {
-        client.post().uri("/api/internal/v1/users/ivanov/profile").header("X-Internal-Key", "test-key")
+        client.post().uri("/api/internal/v1/users/profile").header("X-Internal-Key", "test-key")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(new UserRequest("ivanov", false))
                 .exchange().expectStatus().isOk().expectBody().jsonPath("$.login").isEqualTo("ivanov");
     }
 
     private WebTestClient.ResponseSpec update() {
-        return client.post().uri("/api/internal/v1/users/ivanov/custom-attributes")
+        return client.post().uri("/api/internal/v1/users/custom-attributes")
                 .header("X-Internal-Key", "test-key").contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of("department", "finance")).exchange();
+                .bodyValue(new UpdateCustomAttributesRequest("ivanov", Map.of("department", "finance"))).exchange();
     }
 }

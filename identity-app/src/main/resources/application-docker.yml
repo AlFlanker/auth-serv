@@ -1,0 +1,42 @@
+# =============================================================================
+# Профиль docker: запуск в docker compose (solutions/fk-portal/docker-compose.yml).
+# Перекрывает localhost-адреса из application.yml: etcd и PostgreSQL уже работают
+# на хосте (порты 2379/5432), доступ к ним — через host-gateway
+# (extra_hosts: "etcd-client:host-gateway", "host.docker.internal:host-gateway").
+# =============================================================================
+spring:
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://host.docker.internal:5432/identity}
+    username: ${SPRING_DATASOURCE_USERNAME:identity}
+    password: ${SPRING_DATASOURCE_PASSWORD:identity}
+
+# =============================================================================
+# ETCD: адрес совпадает с ETCD_ADVERTISE_CLIENT_URLS etcd-контейнера
+# =============================================================================
+etcd:
+  endpoints:
+    - ${ETCD_ENDPOINT:http://etcd-client:2379}
+
+# =============================================================================
+# identity-service: внутренний API и ключи (локальный compose-стенд)
+# =============================================================================
+identity:
+  internal:
+    api-key: ${IDENTITY_INTERNAL_API_KEY:change-me}   # Должен совпадать с admin.identity-service.api-key монолита
+  token:
+    keys:
+      ephemeral: true                                 # Ключ на каждый запуск (при перезапуске нужен новый вход)
+
+# =============================================================================
+# Трассы: Jaeger в том же compose (OTLP gRPC, порт 4317)
+# =============================================================================
+management:
+  tracing:
+    export:
+      otlp:
+        enabled: true
+    sampling:
+      probability: 1.0                                # Локальная отладка — экспортировать все трассы
+  otlp:
+    tracing:
+      endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:http://jaeger:4317}

@@ -138,11 +138,11 @@
 
 - M0: каркас, сборка и тесты зелёные;
 - M1: конфиги из etcd — `OSSConfig`/`UsbConfig` (subset полей), watch + события изменения, сброс кэшей;
-- M2: ядро профиля — `OssConnection` (SOAP СОБИ через soap-client + WSDL-resolver, REST USS v1/v2, перепаковка в формат ОШС), команды с Resilience4j, `ProfileService` (реактивный, Caffeine-кэш, автовыбор единственной организации), внутренний API `/api/internal/v1/users/...` (защита `X-Internal-Key`);
+- M2: ядро профиля — `OssConnection` (SOAP СОБИ через soap-client + WSDL-resolver, REST USS v1/v2, перепаковка в формат ОШС), команды с Resilience4j, `ProfileService` (реактивный, Caffeine-кэш, автовыбор единственной организации, признак `cacheHit`), внутренний API `/api/internal/v1/users/...` с телом запроса (защита `X-Internal-Key`);
 - M3: локальные админы (`user/123`, `user2/1234`, BCrypt) и роли (PostgreSQL, H2 в тестах), `GET /roles`, `/roles/{id}`;
 - M4: JWT — RS256, ключ при старте (kid `identity-1`), `/api/v1/token` (SSO-заголовок с cookie-fallback и `^M`, либо локальный логин/пароль), `/api/internal/token/exchange` (перечитывание ролей, проверка отзыва), `/api/v1/logout` (реестр jti в БД), `/.well-known/jwks.json`; claims: `sub`, `username`, `roles[]`, `org_guid`, `org_code`, `auth_source`.
 
-После M5 реализованы постоянные ключи, ротация и ограничения жизненного цикла JWT. Остались мTLS для внутреннего API, rate-limiting на `/api/v1/token`, прогон в dev-контуре против реальных ОШС/ЮСБ, интеграция с fk-portal через feature-toggle (следующий шаг, вне текущего плана).
+После M5 реализованы постоянные ключи, ротация и ограничения жизненного цикла JWT. Остались мTLS для внутреннего API, rate-limiting на `/api/v1/token`, прогон в dev-контуре против реальных ОШС/ЮСБ и включение переключателя в fk-portal на стендах.
 
 ## Возможности сервиса
 
@@ -153,13 +153,26 @@
 
 ### 2. «Прослойка» между монолитом и ОШС/ЮСБ — внутренний API (без JWT)
 
-`POST /api/internal/v1/users/{login}/...`, защита заголовком `X-Internal-Key`:
+Все методы — `POST`, идентификатор пользователя и параметры передаются **в теле запроса** (в путях только статичные сегменты), защита заголовком `X-Internal-Key`:
 
-- `/profile` — профиль + роли + организации (агрегация userInfo + groups);
-- `/groups` — роли пользователя;
-- `/custom-attributes` — редактирование кастомных полей. При получении SOAP-ответа `SimpleResponse` сервис сбрасывает профиль из кэша и отвечает HTTP 204. Для ЮСБ API возвращает 501, при тайм-ауте источника — 504, при SOAP Fault или пустом ответе — 503. Значения поля `SimpleResponse.result` требуют подтверждения по контракту СОБИ в dev-контуре.
+- `/api/internal/v1/users/profile` — тело `{"login","bypassCache"}`; ответ: профиль + роли + организации с признаком `cacheHit` (`true` — отдан из кэша сервиса, `false` — загружен из источника; при `bypassCache=true` всегда `false`);
+- `/api/internal/v1/users/groups` — тело `{"login"}`; роли пользователя (без кэша);
+- `/api/internal/v1/users/organizations` — тело `{"login"}`; организации пользователя из профиля;
+- `/api/internal/v1/users/custom-attributes` — тело `{"login","attributes"}`; редактирование кастомных полей. При получении SOAP-ответа `SimpleResponse` сервис сбрасывает профиль из кэша и отвечает HTTP 204. Для ЮСБ API возвращает 501, при тайм-ауте источника — 504, при SOAP Fault или пустом ответе — 503. Значения поля `SimpleResponse.result` требуют подтверждения по контракту СОБИ в dev-контуре.
+- `/api/internal/v1/users/cache/invalidate` — без тела; полная инвалидация кэша профилей (HTTP 204).
 
 Источники: СОБИ SOAP (JAXB-контракт `fk-services-sobi`, WSDL-resolver для endpoint/SOAPAction с fallback как в монолите), USS REST v1/v2 (перепаковка в формат ОШС, включая админские роли из групп), СОБИ REST — заглушка. На каждый вызов — Resilience4j (таймауты/конкурентность из конфига); Caffeine-кэш профилей с метриками; автовыбор организации, если она одна; пустые группы → `ROLE_UNDEFINED` (поведение монолита сохранено).
+
+### 2а. Интеграция с fk-portal через feature-toggle (реализовано в монолите)
+
+- Переключатель: `OSSConfig.redirectToExternalService` (конфиг-БД/UI, по умолчанию выключен) + `OSSConfig.externalIdentityServiceUrl` — базовый URL внутреннего API. Значения попадают в etcd (`fk-portal/OSSConfig`) и игнорируются сервисом (subset-DTO).
+- Секрет `admin.identity-service.api-key` (application.yml/secret-manager, совпадает с `identity.internal.api-key`) — в конфиг-БД не хранится.
+- В монолите `OSSUserDetailsService` при включённом переключателе направляет загрузку профиля/ролей/кастомных полей в `IdentityServiceClient` (WebClient, пул `IDENTITY_SERVICE`, `X-Internal-Key`); **локальный кэш монолита в этом режиме не наполняется** — кэширует только identity-service.
+- Событие `UserLoadedEvent` (потребитель — `UserLastLoginDateService`) публикуется только при `cacheHit=false`, т.е. на реальных загрузках из источника — как сегодня при промахах локального кэша.
+- Инвалидация кэша (`/api/v1/userinfo/cache/invalidate`) во внешнем режиме вызывает `/api/internal/v1/users/cache/invalidate`.
+- Откат — выключить переключатель (без правок БД/etcd); `OssConfigChangedEvent` пересоздаёт WebClient клиента без рестарта.
+
+**Локальный запуск (docker compose).** Сервис добавлен в compose-стенд портала (`solutions/fk-portal/docker-compose.yml`: сервисы `identity-service` и `jaeger`); профиль `docker` (`application-docker.yml`) подключается к уже работающим на хосте etcd/PostgreSQL через host-gateway, ключ подписи — ephemeral, трассы — все в Jaeger (UI `http://localhost:16686`). Запуск: `docker compose build identity-service` → `docker compose up -d jaeger` → `docker compose up -d --no-deps identity-service`.
 
 ### 3. Локальные админы и роли (PostgreSQL)
 

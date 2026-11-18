@@ -139,9 +139,10 @@ $base = 'http://localhost:8091'
 Обе проверки здоровья должны вернуть `UP`. Готовность учитывает состояние приложения, соединение с БД и настройки SSO. При `USB` требуются обе записи etcd. Проверьте внутренний маршрут и общий ключ запросом профиля существующего тестового пользователя. Сервис может вернуть профиль из кэша. Введите тот же ключ внутреннего API в терминале клиента.
 
 ```powershell
-$login = [uri]::EscapeDataString((Read-Host 'Канонический логин тестового пользователя'))
+$login = (Read-Host 'Канонический логин тестового пользователя')
 $internalHeaders = @{ 'X-Internal-Key' = (Read-Host 'Общий ключ внутреннего API dev-контура' -MaskInput) }
-(Invoke-RestMethod -Method Post -Uri "$base/api/internal/v1/users/$login/profile" -Headers $internalHeaders).login
+$body = @{ login = $login; bypassCache = $false } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri "$base/api/internal/v1/users/profile" -Headers $internalHeaders -ContentType 'application/json' -Body $body | Select-Object login, cacheHit
 ```
 
 Ответ должен содержать запрошенный логин. Чтобы проверить подключение к ОШС или ЮСБ, войдите тестовым пользователем через SSO-провайдера и вызовите через доверенный прокси `POST /api/v1/token`. При выдаче сервис читает свежий профиль в обход кэша профилей. Для проверки обмена однократно предъявите полученный JWT на `POST /api/internal/token/exchange` с `Authorization: Bearer <jwt>` и `X-Internal-Key`, затем предъявите новый Bearer JWT на `POST /api/v1/logout`. Успешный выход возвращает 204, последующий обмен этого JWT — 401.

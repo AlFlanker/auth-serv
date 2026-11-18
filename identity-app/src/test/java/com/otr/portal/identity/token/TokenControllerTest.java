@@ -79,7 +79,7 @@ class TokenControllerTest {
                 List.of("ROLE_ADMIN"),
                 List.of(new Organization("Организация", "Организация", "ORG-1", "GUID-1",
                         null, null, null, null, null)),
-                "ORG-1", "GUID-1")));
+                "ORG-1", "GUID-1", false)));
 
         var token = client.post().uri("/api/v1/token")
                 .header("X-Auth", "ivanov")
@@ -149,7 +149,7 @@ class TokenControllerTest {
         when(tokenRegistry.isActive(any())).thenReturn(Mono.just(true));
         when(profileService.loadWithoutCache("ivanov")).thenReturn(Mono.just(new Profile(
                 "ivanov", null, null, null, null, null, null, null, "ivanov", null, null, null,
-                List.of("ROLE_FRESH"), List.of(), "ORG-NEW", "GUID-NEW")));
+                List.of("ROLE_FRESH"), List.of(), "ORG-NEW", "GUID-NEW", false)));
         when(tokenRegistry.exchange(any(), any(), any())).thenReturn(Mono.just(true));
 
         var body = client.post().uri("/api/internal/token/exchange")

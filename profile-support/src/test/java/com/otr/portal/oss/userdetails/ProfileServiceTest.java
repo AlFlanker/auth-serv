@@ -140,6 +140,33 @@ class ProfileServiceTest {
     }
 
     @Test
+    void cacheHitFlagFollowsTheSourceOfTheProfile() {
+        var userInfoResponse = userInfoResponse(List.of(userInfo("Иванов Иван", "ORG-CODE-1", "GUID-1")));
+        when(commandFactory.buildCommand(any(GetUserDetailsRequest.class)))
+                .thenReturn(Mono.just((Command<GetUserInfoResponse>) () -> Mono.just(userInfoResponse)));
+        when(commandFactory.buildCommand(any(GetAuthoritiesRequest.class)))
+                .thenReturn(Mono.just((Command<List<String>>) () -> Mono.just(List.of())));
+
+        // Первый вызов — реальная загрузка из источника (промах кэша).
+        assertThat(profileService.load("ivanov").block().cacheHit()).isFalse();
+        // Второй вызов — из кэша.
+        assertThat(profileService.load("ivanov").block().cacheHit()).isTrue();
+    }
+
+    @Test
+    void loadWithoutCache_alwaysReportsCacheMiss() {
+        var userInfoResponse = userInfoResponse(List.of(userInfo("Иванов Иван", "ORG-CODE-1", "GUID-1")));
+        when(commandFactory.buildCommand(any(GetUserDetailsRequest.class)))
+                .thenReturn(Mono.just((Command<GetUserInfoResponse>) () -> Mono.just(userInfoResponse)));
+        when(commandFactory.buildCommand(any(GetAuthoritiesRequest.class)))
+                .thenReturn(Mono.just((Command<List<String>>) () -> Mono.just(List.of())));
+
+        // Прогреваем кэш и проверяем, что обход кэша всегда сообщает «не из кэша».
+        profileService.load("ivanov").block();
+        assertThat(profileService.loadWithoutCache("ivanov").block().cacheHit()).isFalse();
+    }
+
+    @Test
     void ttlCountsFromWriteAndBothConfigEventsInvalidateTheMeteredCache() {
         var info = userInfoResponse(List.of(userInfo("Иванов", "ORG", "GUID")));
         var roles = new AtomicReference<>(List.of("OLD"));

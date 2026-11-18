@@ -45,6 +45,26 @@ $env:GRADLE_USER_HOME='C:\dev\identity-service\.gradle-home'
 Не задавайте `GRADLE_RO_DEP_CACHE`: с ним Gradle не генерирует `workerMain/gradle-worker.jar`
 в локальном кэше, и тесты падают с ClassNotFoundException.
 
+## Запуск в Docker (docker compose)
+
+Сервис входит в compose-стенд портала: `C:\Users\AlexFlanker\Documents\ОТР\solutions\fk-portal\docker-compose.yml`
+(сервис `identity-service` + `jaeger`). etcd и PostgreSQL уже работают в docker на хосте — контейнер обращается к ним
+через host-gateway (профиль `docker`, см. [application-docker.yml](identity-app/src/main/resources/application-docker.yml)).
+
+```powershell
+# в C:\Users\AlexFlanker\Documents\ОТР\solutions\fk-portal
+docker compose build identity-service        # предварительно: gradlew build в C:\dev\identity-service
+docker compose up -d jaeger
+docker compose up -d --no-deps identity-service
+```
+
+- Профиль `docker`: etcd `http://etcd-client:2379` (host-gateway), БД `jdbc:postgresql://host.docker.internal:5432/identity`
+  (роль/БД создаются при первичной инициализации postgres — `environment/docker/pg/init/02_identity-service.sql`),
+  ключ подписи ephemeral, трассы — все в Jaeger (`management.tracing.sampling.probability=1.0`).
+- `IDENTITY_INTERNAL_API_KEY` в compose должен совпадать с `IDENTITY_INTERNAL_API_KEY` монолита
+  (`admin.identity-service.api-key`).
+- Jaeger UI: `http://localhost:16686`, OTLP gRPC — порт 4317.
+
 ## Запуск
 
 ```powershell
@@ -93,10 +113,11 @@ Prometheus получает метрики по `/actuator/prometheus`. Чтоб
 | `POST /api/internal/token/exchange` | Однократный обмен действующего токена с перечитыванием прав (`Authorization: Bearer <jwt>` и `X-Internal-Key`) |
 | `POST /api/v1/logout` | Отзыв предъявленного Bearer JWT по его `jti`; успешный ответ HTTP 204 |
 | `GET /.well-known/jwks.json` | Публичные ключи подписи (JWKS) |
-| `POST /api/internal/v1/users/{login}/profile` | Профиль + роли + организации (внутренний API, заголовок `X-Internal-Key`) |
-| `POST /api/internal/v1/users/{login}/groups` | Роли пользователя (внутренний API) |
-| `POST /api/internal/v1/users/organizations/{login}` | Организации пользователя из профиля (внутренний API) |
-| `POST /api/internal/v1/users/{login}/custom-attributes` | Редактирование кастомных полей (внутренний API, ОШС) |
+| `POST /api/internal/v1/users/profile` | Профиль + роли + организации; тело `{"login","bypassCache"}`, ответ содержит признак `cacheHit` (внутренний API, заголовок `X-Internal-Key`) |
+| `POST /api/internal/v1/users/groups` | Роли пользователя; тело `{"login"}` (внутренний API) |
+| `POST /api/internal/v1/users/organizations` | Организации пользователя из профиля; тело `{"login"}` (внутренний API) |
+| `POST /api/internal/v1/users/custom-attributes` | Редактирование кастомных полей; тело `{"login","attributes"}` (внутренний API, ОШС) |
+| `POST /api/internal/v1/users/cache/invalidate` | Полная инвалидация кэша профилей; тело не требуется (внутренний API) |
 | `GET /roles`, `GET /roles/{id}` | Локальные роли |
 
 ### Жизненный цикл JWT
@@ -147,5 +168,4 @@ Actuator на том же порту (`management.endpoints.web.exposure.include
 
 - мTLS для внутреннего API вместо общего ключа;
 - Rate limiting на `/api/v1/token`;
-- Прогон в dev-контуре против реальных ОШС/ЮСБ;
-- Интеграция с fk-portal через feature-toggle — следующий шаг, вне текущего плана.
+- Прогон в dev-контуре против реальных ОШС/ЮСБ и включение переключателя в fk-portal на стендах (реализация интеграции — см. [docs/identity-service.md](docs/identity-service.md), раздел «Интеграция с fk-portal через feature-toggle»).

@@ -7,6 +7,8 @@ import java.util.List;
  *
  * @param activeOrgCode код СВР активной организации; заполняется автоматически, если организация одна
  * @param activeOrgGuid GUID активной организации; заполняется автоматически, если организация одна
+ * @param cacheHit {@code true}, если профиль отдан из кэша {@link com.otr.portal.oss.userdetails.ProfileService},
+ *                а не загружен из источника (ОШС/ЮСБ). Вычисляется на каждый запрос в {@code ProfileService.load()}
  */
 public record Profile(
         String login,
@@ -24,10 +26,21 @@ public record Profile(
         List<String> roles,
         List<Organization> organizations,
         String activeOrgCode,
-        String activeOrgGuid
+        String activeOrgGuid,
+        boolean cacheHit
 ) {
 
     public boolean hasSingleOrganization() {
         return organizations != null && organizations.size() == 1;
+    }
+
+    /**
+     * Копия профиля с признаком источника (кэш/источник), без пересоздания остальных полей.
+     */
+    public Profile withCacheHit(boolean fromCache) {
+        return new Profile(
+                login, fullName, departmentName, titleName, phoneWorkplace, phoneOther, snils,
+                email, samAccountName, accountGuid, orgFullName, organizationName,
+                roles, organizations, activeOrgCode, activeOrgGuid, fromCache);
     }
 }

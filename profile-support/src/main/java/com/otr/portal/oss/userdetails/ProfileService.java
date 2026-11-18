@@ -88,23 +88,29 @@ public class ProfileService {
     private record CachedProfile(Profile profile, Duration lifetime) {}
 
     /**
-     * Загружает профиль пользователя (с кэшем).
+     * Загружает профиль пользователя (с кэшем). Признак {@link Profile#cacheHit()} показывает,
+     * был ли профиль отдан из кэша или фактически загружен из источника (ОШС/ЮСБ).
      */
     public Mono<Profile> load(String username) {
         return Mono.defer(() -> {
+            // Признак «из кэша» фиксируем до вызова по наличию записи (включая in-flight):
+            // параллельные запросы коалесцируются в одну загрузку, как в LoadingCache монолита,
+            // поэтому конкурирующий запрос считается «из кэша». asMap() не пишет статистику Caffeine.
+            boolean cacheHit = cache.asMap().containsKey(username);
             var pending = cache.get(username);
             // При повторном запросе после ошибки загружаем профиль заново.
             return Mono.fromFuture(pending, true)
                     .doOnError(error -> cache.asMap().remove(username, pending))
-                    .map(CachedProfile::profile);
+                    .map(cached -> cached.profile().withCacheHit(cacheHit));
         });
     }
 
     /**
-     * Загружает профиль пользователя, минуя кэш.
+     * Загружает профиль пользователя, минуя кэш (всегда {@code cacheHit=false}).
      */
     public Mono<Profile> loadWithoutCache(String username) {
-        return config().flatMap(cfg -> loadFromOss(username, cfg));
+        return config().flatMap(cfg -> loadFromOss(username, cfg))
+                .map(profile -> profile.withCacheHit(false));
     }
 
     /**
@@ -226,6 +232,7 @@ public class ProfileService {
                 roles,
                 organizations,
                 activeOrgCode,
-                activeOrgGuid);
+                activeOrgGuid,
+                false);
     }
 }

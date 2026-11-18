@@ -5,7 +5,6 @@ import com.otr.portal.oss.model.Profile;
 import com.otr.portal.oss.userdetails.ProfileService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -13,12 +12,12 @@ import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.Map;
 
 /**
- * Внутренний API профиля — контур будущей интеграции с монолитом fk-portal
+ * Внутренний API профиля — контур интеграции с монолитом fk-portal
  * («прослойка между монолитом и USS/OSS», без JWT).
- * Защищён {@link com.otr.portal.identity.api.internal.InternalApiKeyWebFilter}.
+ * Идентификатор пользователя и параметры передаются в теле запроса, пути статичные.
+ * Защищён {@link InternalApiKeyWebFilter} (заголовок {@code X-Internal-Key}).
  */
 @RestController
 @RequestMapping("/api/internal/v1/users")
@@ -27,25 +26,32 @@ public class InternalProfileController {
 
     private final ProfileService profileService;
 
-    @PostMapping("/{login}/profile")
-    public Mono<Profile> profile(@PathVariable String login) {
-        return profileService.load(login);
+    @PostMapping("/profile")
+    public Mono<Profile> profile(@RequestBody UserRequest request) {
+        return Boolean.TRUE.equals(request.bypassCache())
+                ? profileService.loadWithoutCache(request.login())
+                : profileService.load(request.login());
     }
 
-    @PostMapping("/{login}/groups")
-    public Mono<List<String>> groups(@PathVariable String login) {
-        return profileService.getUserAuthorities(login);
+    @PostMapping("/groups")
+    public Mono<List<String>> groups(@RequestBody UserRequest request) {
+        return profileService.getUserAuthorities(request.login());
     }
 
-    @PostMapping("/{login}/custom-attributes")
-    public Mono<ResponseEntity<Void>> updateCustomAttributes(@PathVariable String login,
-                                                             @RequestBody Map<String, String> attributes) {
-        return profileService.updateCustomFields(login, attributes)
+    @PostMapping("/custom-attributes")
+    public Mono<ResponseEntity<Void>> updateCustomAttributes(@RequestBody UpdateCustomAttributesRequest request) {
+        return profileService.updateCustomFields(request.login(), request.attributes())
                 .thenReturn(ResponseEntity.noContent().build());
     }
 
-    @PostMapping("/organizations/{login}")
-    public Mono<List<Organization>> organizations(@PathVariable String login) {
-        return profileService.getOrganizations(login);
+    @PostMapping("/organizations")
+    public Mono<List<Organization>> organizations(@RequestBody UserRequest request) {
+        return profileService.getOrganizations(request.login());
+    }
+
+    @PostMapping("/cache/invalidate")
+    public Mono<ResponseEntity<Void>> invalidateCache() {
+        return Mono.fromRunnable(profileService::invalidateAll)
+                .thenReturn(ResponseEntity.noContent().build());
     }
 }

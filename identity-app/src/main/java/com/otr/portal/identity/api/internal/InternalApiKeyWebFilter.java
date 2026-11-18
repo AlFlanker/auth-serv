@@ -29,7 +29,9 @@ public class InternalApiKeyWebFilter implements WebFilter {
     private final byte[] apiKey;
 
     public InternalApiKeyWebFilter(@Value("${identity.internal.api-key:}") String apiKey) {
-        this.apiKey = hasText(apiKey) ? apiKey.getBytes(StandardCharsets.UTF_8) : null;
+        this.apiKey = hasText(apiKey)
+                ? apiKey.getBytes(StandardCharsets.UTF_8)
+                : null;
     }
 
     @Override
