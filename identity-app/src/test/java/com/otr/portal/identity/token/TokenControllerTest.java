@@ -18,6 +18,7 @@ import com.otr.portal.token.TokenService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.springframework.dao.QueryTimeoutException;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
 import org.springframework.test.web.reactive.server.WebTestClient;
@@ -164,6 +165,18 @@ class TokenControllerTest {
         var jwt = jwtDecoder.decode(body.accessToken());
         assertThat(jwt.getClaimAsStringList("roles")).containsExactly("ROLE_FRESH");
         assertThat(jwt.getClaimAsString("org_code")).isEqualTo("ORG-NEW");
+    }
+
+    @Test
+    void exchangeReportsDatabaseTimeoutAsServerError() {
+        var original = tokenService.mint(new TokenClaims("user", List.of(), null, null, "password")).block();
+        when(tokenRegistry.isActive(any())).thenReturn(Mono.just(true));
+        when(localUserService.authorities("user")).thenReturn(List.of("ROLE_USER"));
+        when(tokenRegistry.exchange(any(), any(), any())).thenReturn(Mono.error(new QueryTimeoutException("timeout")));
+
+        client.post().uri("/api/internal/token/exchange").header("Authorization", "Bearer " + original)
+                .exchange().expectStatus().is5xxServerError()
+                .expectHeader().doesNotExist("WWW-Authenticate");
     }
 
     @Test

@@ -181,7 +181,7 @@ class UsbRestBackendTest {
                 resilience.circuitBreakerRegistry(meter), resilience.retryRegistry(meter));
         var commands = new OssCommandFactory(new OssConnectionImpl(backendFactory), source, ossKey,
                 new CommandResilienceDecorator(registry));
-        return new ProfileService(commands, source, ossKey, usbKey, events, meter);
+        return new ProfileService(commands, source, ossKey, usbKey, events, meter, 1000);
     }
 
     @Test

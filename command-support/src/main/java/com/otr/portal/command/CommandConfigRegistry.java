@@ -6,9 +6,7 @@ import com.otr.portal.command.model.CommandResilienceHolder;
 import io.github.resilience4j.bulkhead.Bulkhead;
 import io.github.resilience4j.bulkhead.BulkheadConfig;
 import io.github.resilience4j.bulkhead.BulkheadRegistry;
-import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
-import io.github.resilience4j.retry.Retry;
 import io.github.resilience4j.retry.RetryRegistry;
 import io.github.resilience4j.timelimiter.TimeLimiter;
 import io.github.resilience4j.timelimiter.TimeLimiterConfig;
@@ -19,6 +17,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -38,24 +37,44 @@ public class CommandConfigRegistry implements CommandResilienceEvictor {
     private final CircuitBreakerRegistry circuitBreakerRegistry;
     private final RetryRegistry retryRegistry;
 
-    private final Map<String, CommandResilienceHolder> commandConfigs = new ConcurrentHashMap<>();
+    private record CachedCommand(CommandProperties properties, CommandResilienceHolder holder) {}
 
-    /**
-     * Возвращает конфиг по имени команды; при отсутствии атомарно создаёт его с переданными свойствами.
-     * Потокобезопасно: при одновременном запросе одного и того же имени конфиг создаётся один раз.
-     * @return актуальный конфиг
-     */
-    CommandResilienceHolder getOrCreate(CommandContext commandContext) {
-        return commandConfigs
-                .computeIfAbsent(commandContext.getCommandName(), key ->
-                        buildHolder(key, commandContext.getProperties()));
+    private final Map<String, CachedCommand> commandConfigs = new ConcurrentHashMap<>();
+
+    CommandResilienceHolder getOrCreate(CommandContext context) {
+        var cached = commandConfigs.get(context.getCommandName());
+        if (cached != null && cached.properties().equals(context.getProperties())) {
+            return cached.holder();
+        }
+        return refresh(context.getCommandName(), context.getProperties());
+    }
+
+    private synchronized CommandResilienceHolder refresh(String name, CommandProperties properties) {
+        var previous = commandConfigs.get(name);
+        if (previous != null && previous.properties().equals(properties)) {
+            return previous.holder();
+        }
+        var bulkhead = previous != null && previous.properties().getMaxConcurrency() == properties.getMaxConcurrency()
+                ? previous.holder().getBulkhead()
+                : resolveBulkhead(name, properties, previous != null);
+        var limiter = previous != null && Objects.equals(previous.properties().getTimeout(), properties.getTimeout())
+                ? previous.holder().getTimeLimiter()
+                : resolveTimeLimiter(name, properties, previous != null);
+        var holder = CommandResilienceHolder.builder()
+                .bulkhead(bulkhead)
+                .timeLimiter(limiter)
+                .circuitBreaker(circuitBreakerRegistry.circuitBreaker(name))
+                .retry(retryRegistry.retry(name))
+                .build();
+        commandConfigs.put(name, new CachedCommand(properties, holder));
+        return holder;
     }
 
     /**
      * Очищает весь реестр: все конфиги команд и все записи в Resilience4j-реестрах
      * (Bulkhead, TimeLimiter, CircuitBreaker, Retry).
      */
-    public void clearAllCaches() {
+    public synchronized void clearAllCaches() {
         commandConfigs.clear();
 
         bulkheadRegistry.getAllBulkheads()
@@ -76,7 +95,7 @@ public class CommandConfigRegistry implements CommandResilienceEvictor {
      * @param prefix имя команды
      */
     @Override
-    public void evictByCommandPrefix(String prefix) {
+    public synchronized void evictByCommandPrefix(String prefix) {
         commandConfigs.keySet()
                 .stream()
                 .filter(command ->
@@ -100,30 +119,11 @@ public class CommandConfigRegistry implements CommandResilienceEvictor {
         log.info("Resilience4j для команд(-ы) \"{}\" регистр очищен", prefix);
     }
 
-    /**
-     * Собирает конфигурацию Resilience4j для команды (без записи в map).
-     *
-     * @param commandKey имя команды
-     * @param properties настройки (timeout, maxConcurrency)
-     * @return новый {@link CommandResilienceHolder}
-     */
-    private CommandResilienceHolder buildHolder(String commandKey, CommandProperties properties) {
-        Bulkhead bulkhead = resolveBulkhead(commandKey, properties);
-        TimeLimiter timeLimiter = resolveTimeLimiter(commandKey, properties);
-        CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker(commandKey);
-        Retry retry = retryRegistry.retry(commandKey);
-
-        return CommandResilienceHolder.builder()
-                .bulkhead(bulkhead)
-                .timeLimiter(timeLimiter)
-                .circuitBreaker(circuitBreaker)
-                .retry(retry)
-                .build();
-    }
-
-    private Bulkhead resolveBulkhead(String commandKey, CommandProperties properties) {
-        if (properties.getMaxConcurrency() > 0) {
+    private Bulkhead resolveBulkhead(String commandKey, CommandProperties properties, boolean replacing) {
+        if (replacing || properties.getMaxConcurrency() > 0) {
             bulkheadRegistry.remove(commandKey);
+        }
+        if (properties.getMaxConcurrency() > 0) {
             BulkheadConfig config = BulkheadConfig.custom()
                     .maxConcurrentCalls(properties.getMaxConcurrency())
                     .maxWaitDuration(Duration.ZERO)
@@ -134,9 +134,11 @@ public class CommandConfigRegistry implements CommandResilienceEvictor {
         return bulkheadRegistry.bulkhead(commandKey);
     }
 
-    private TimeLimiter resolveTimeLimiter(String commandKey, CommandProperties properties) {
-        if (properties.getTimeout() != null) {
+    private TimeLimiter resolveTimeLimiter(String commandKey, CommandProperties properties, boolean replacing) {
+        if (replacing || properties.getTimeout() != null) {
             timeLimiterRegistry.remove(commandKey);
+        }
+        if (properties.getTimeout() != null) {
             TimeLimiterConfig config = TimeLimiterConfig.custom()
                     .timeoutDuration(properties.getTimeout())
                     .cancelRunningFuture(true)

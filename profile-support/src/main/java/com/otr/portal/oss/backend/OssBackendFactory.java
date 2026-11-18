@@ -65,7 +65,9 @@ public class OssBackendFactory {
                         return Mono.error(new IllegalStateException("Не задан адрес источника профилей (ossUrl)"));
                     }
                     var cacheKey = config.ossType() + "|" + url;
-                    return backendCache.computeIfAbsent(cacheKey, key -> buildBackend(config, url).cache());
+                    // Разделяем успешное построение между запросами. Следующая подписка повторит неудачную загрузку.
+                    return backendCache.computeIfAbsent(cacheKey, key ->
+                            Mono.defer(() -> buildBackend(config, url)).cacheInvalidateIf(backend -> false));
                 });
     }
 

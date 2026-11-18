@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import java.util.Collection;
 
@@ -23,12 +24,14 @@ public class RolesController {
 
     @GetMapping
     public Mono<Collection<Role>> list() {
-        return Mono.fromCallable(roleService::getRoles);
+        return Mono.<Collection<Role>>fromCallable(roleService::getRoles)
+                .subscribeOn(Schedulers.boundedElastic());
     }
 
     @GetMapping("/{id}")
     public Mono<ResponseEntity<Role>> get(@PathVariable String id) {
         return Mono.fromCallable(() -> roleService.getRole(id))
+                .subscribeOn(Schedulers.boundedElastic())
                 .map(role -> role.map(ResponseEntity::ok)
                         .orElseGet(() -> ResponseEntity.status(HttpStatus.NOT_FOUND).build()));
     }
