@@ -36,12 +36,16 @@ public class ConfigKeysWatcher implements SmartLifecycle {
 
     private final WatchableConfigSource configSource;
     private final List<ConfigKey<?>> watchedKeys;
-    private final Disposable.Composite subscriptions = Disposables.composite();
+    private Disposable.Composite subscriptions;
     private final ApplicationEventPublisher publisher;
     private volatile boolean running = false;
 
     @Override
-    public void start() {
+    public synchronized void start() {
+        if (running) {
+            return;
+        }
+        subscriptions = Disposables.composite();
         log.info("Старт отслеживания изменений по ключам: {}",
                 watchedKeys.stream()
                         .map(ConfigKey::key)
@@ -51,7 +55,10 @@ public class ConfigKeysWatcher implements SmartLifecycle {
     }
 
     @Override
-    public void stop() {
+    public synchronized void stop() {
+        if (!running) {
+            return;
+        }
         log.info("Прекращаем отслеживание изменений по ключам: {}",
                 watchedKeys.stream()
                         .map(ConfigKey::key)
@@ -70,14 +77,20 @@ public class ConfigKeysWatcher implements SmartLifecycle {
                     // подписка на изменения ставится до чтения начального значения, иначе события,
                     // пришедшие за время загрузки, были бы потеряны (sink не реплеит прошлое).
                     // Буферизуется последнее актуальное - промежуточные состояния устаревают
-                    ConnectableFlux<ConfigChange> updates = configSource.watchKey(key).replay(1);
+                    ConnectableFlux<ConfigChange> updates = configSource.watchKeyIncludingSync(key.key()).replay(1);
                     Disposable connection = updates.connect();
                     return configSource.get(key)
                             .doOnNext(value -> log.info("Конфигурация '{}' загружена: {}",
                                     key.key(), key.type().getSimpleName()))
                             .switchIfEmpty(Mono.fromRunnable(() ->
                                     log.warn("Ключ '{}' отсутствует в источнике конфигурации", key.key())))
+                            .doOnSuccess(ignored -> publishConfigurationChangedEvent(key.key()))
                             .thenMany(updates)
+                            .doOnNext(change -> {
+                                publishConfigurationChangedEvent(key.key());
+                                log.info("Конфигурация '{}' актуализирована ({})", key.key(), change.type());
+                            })
+                            .concatWith(Mono.error(() -> new IllegalStateException("Watch-поток завершился")))
                             .doFinally(signal -> connection.dispose());
                 })
                 // временный сбой (например, таймаут etcd на старте) не должен навсегда убивать
@@ -88,15 +101,7 @@ public class ConfigKeysWatcher implements SmartLifecycle {
                                 "Слежение за ключом '{}' оборвано ({}), переподписка (попытка {})",
                                 key.key(), signal.failure().getClass().getSimpleName(), signal.totalRetries() + 1)))
                 .subscribe(
-                        change -> {
-                            switch (change.type()) {
-                                case PUT, DELETE -> {
-                                    publishConfigurationChangedEvent(change.key());
-                                    log.info("Конфигурация '{}' актуализирована", key.key());
-                                }
-                                default -> log.trace("Игнорируем событие '{}'", change.type());
-                            }
-                        },
+                        ignored -> {},
                         error -> log.error("Слежение за ключом '{}' остановлено окончательно ({})",
                                 key.key(), error.getClass().getSimpleName())
                 );

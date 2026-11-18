@@ -41,6 +41,7 @@ dependencies {
     implementation("org.springframework.security:spring-security-core")
     implementation("org.springframework.security:spring-security-crypto")
     runtimeOnly("org.postgresql:postgresql")
+    runtimeOnly("io.micrometer:micrometer-registry-prometheus")
 
     testImplementation("com.h2database:h2")
 

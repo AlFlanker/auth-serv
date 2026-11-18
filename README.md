@@ -68,13 +68,23 @@ java -jar identity-app\build\libs\identity-app-0.0.1-SNAPSHOT.jar
 | `identity.token.ttl` / `max-session-lifetime` | Время жизни одного JWT (30 мин) и предел цепочки обменов от первичной выдачи (8 ч) |
 | `identity.token.issuer` / `audiences` | Точный URL издателя и список получателей (по умолчанию `https://identity-service` и `[portal-edge]`) |
 | `identity.token.clock-skew` / `jwks-cache-ttl` | Допуск на расхождение часов (30 с) и срок HTTP-кэширования JWKS (5 мин) |
+| `identity.token.registry.transaction-timeout` | Тайм-аут транзакции реестра после получения JDBC-соединения, включая ожидание блокировки. По умолчанию 5 с, задаётся целым числом секунд |
+| `identity.token.registry.purge-batch-size` | Максимум строк за одну транзакцию очистки, от 1 до 10 000. По умолчанию 500 |
+| `identity.token.registry.purge-delay` / `purge-initial-delay` | Интервал от окончания очистки до следующего запуска (1 ч) и задержка первого запуска (1 мин) |
+| `identity.profile.cache.maximum-size` | Максимум кэшированных профилей на реплику, по умолчанию 10 000 |
 | `identity.auth.local-password-enabled` / `sso-cookie-enabled` | Дополнительные способы входа, оба по умолчанию выключены |
 | `admin.security.usb.*` | `applicationCode`, `resourceTypeCode`, `operationCode` для USS |
 | `spring.datasource.*` | Подключение к PostgreSQL |
 | `etcd.*`, `config.source.*` | Клиент etcd и кэширование конфигов |
 
-Из etcd (префикс `fk-portal/`, hot-reload через config-source): `OSSConfig`, `UsbConfig` —
-DTO содержат только необходимые сервису поля.
+Конфигурации `OSSConfig` и `UsbConfig` читаются из etcd с префиксом `fk-portal/`.
+Параметр `OSSConfig.cacheTimeMin` ограничивает возраст профиля от момента записи. Изменение конфигурации ОШС или ЮСБ и восстановление watch в etcd сбрасывают локальный кэш профилей и бэкендов. Новые команды используют актуальные тайм-ауты и лимиты конкурентности. Начатые вызовы завершаются со своими настройками.
+
+### Проверка готовности и метрики
+
+Для приёма трафика используйте `/actuator/health/readiness`. Проверка учитывает состояние приложения, соединение с БД и конфигурацию SSO. Для ЮСБ требуются обе записи, `OSSConfig` и `UsbConfig`. После исправления записей сервис восстанавливает готовность при следующей успешной проверке. Для проверки самого процесса используйте `/actuator/health/liveness`.
+
+Prometheus получает метрики по `/actuator/prometheus`. Чтобы включить экспорт трасс, задайте `management.tracing.export.otlp.enabled=true` и адрес gRPC-коллектора в `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Доля выборки задаётся `management.tracing.sampling.probability` и по умолчанию равна `0.1`.
 
 ## API
 

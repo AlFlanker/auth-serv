@@ -3,6 +3,7 @@ package com.otr.portal.config.source;
 import reactor.core.Disposable;
 import reactor.core.publisher.ConnectableFlux;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.function.Function;
 
@@ -38,9 +39,12 @@ public interface WatchableConfigSource extends ConfigSource {
      * @return поток изменений ключа (PUT и DELETE)
      */
     default Flux<ConfigChange> watchKey(String key) {
-        return watch(key)
-                .filter(change ->
-                        change.type() != ConfigChangeType.SYNC && change.key().equals(key));
+        return watchKeyIncludingSync(key).filter(change -> change.type() != ConfigChangeType.SYNC);
+    }
+
+    /** После SYNC значение ключа необходимо перечитать, в том числе если он был удалён. */
+    default Flux<ConfigChange> watchKeyIncludingSync(String key) {
+        return watch(key).filter(change -> change.type() == ConfigChangeType.SYNC || key.equals(change.key()));
     }
 
     /**
@@ -68,12 +72,13 @@ public interface WatchableConfigSource extends ConfigSource {
      */
     default <T> Flux<T> watchValue(String key, Class<T> type, Function<String, T> parser) {
         return Flux.defer(() -> {
-            ConnectableFlux<T> updates = watchKey(key)
-                    .filter(change -> change.type() == ConfigChangeType.PUT && change.value() != null)
-                    .map(change -> parser.apply(change.value()))
-                    .replay(1);
+            ConnectableFlux<ConfigChange> updates = watchKeyIncludingSync(key).replay(1);
             Disposable connection = updates.connect();
-            return Flux.concat(get(key, type, parser), updates)
+            return Flux.concat(get(key, type, parser), updates.concatMap(change -> switch (change.type()) {
+                        case SYNC -> get(key, type, parser);
+                        case PUT -> Mono.justOrEmpty(change.value()).map(parser);
+                        case DELETE -> Mono.empty();
+                    }))
                     .doFinally(signal -> connection.dispose());
         });
     }

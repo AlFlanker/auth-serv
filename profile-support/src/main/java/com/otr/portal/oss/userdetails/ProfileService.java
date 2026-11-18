@@ -2,12 +2,14 @@ package com.otr.portal.oss.userdetails;
 
 import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.Expiry;
 import com.otr.portal.command.Command;
 import com.otr.portal.config.source.ConfigKey;
 import com.otr.portal.config.source.ConfigSource;
 import com.otr.portal.oss.config.OssConfig;
 import com.otr.portal.oss.config.OssConfigChangedEvent;
 import com.otr.portal.oss.config.UsbConfig;
+import com.otr.portal.oss.config.UsbConfigChangedEvent;
 import com.otr.portal.oss.exception.ProfileNotFoundException;
 import com.otr.portal.oss.model.Organization;
 import com.otr.portal.oss.model.Profile;
@@ -19,18 +21,18 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
 import lombok.extern.slf4j.Slf4j;
 import org.jetbrains.annotations.NotNull;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 import ru.otr.hr.ws.organization.v3.GetUserInfoResponse;
-import ru.otr.hr.ws.organization.v3.TEmployee;
 import ru.otr.hr.ws.organization.v3.TUserInfo;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.TimeUnit;
 
 import static java.util.Collections.emptyList;
 
@@ -42,51 +44,59 @@ import static java.util.Collections.emptyList;
 @Service
 public class ProfileService {
 
-    private static final int DEFAULT_CACHE_TTL_MINUTES = 60;
-
     private final OssCommandFactory commandFactory;
     private final ConfigSource configSource;
     private final ConfigKey<OssConfig> ossConfigKey;
     private final ConfigKey<UsbConfig> usbConfigKey;
     private final ApplicationEventPublisher eventPublisher;
 
-    private volatile AsyncLoadingCache<String, Profile> cache = buildCache(DEFAULT_CACHE_TTL_MINUTES);
-    private volatile int cacheTtlMinutes = DEFAULT_CACHE_TTL_MINUTES;
+    private final AsyncLoadingCache<String, CachedProfile> cache;
 
+    @Autowired
     public ProfileService(OssCommandFactory commandFactory,
                           ConfigSource configSource,
                           ConfigKey<OssConfig> ossConfigKey,
                           ConfigKey<UsbConfig> usbConfigKey,
                           ApplicationEventPublisher eventPublisher,
-                          MeterRegistry meterRegistry) {
+                          MeterRegistry meterRegistry,
+                          @Value("${identity.profile.cache.maximum-size:10000}") long maximumSize) {
+        this(commandFactory, configSource, ossConfigKey, usbConfigKey, eventPublisher, meterRegistry,
+                maximumSize, Caffeine.newBuilder());
+    }
+
+    ProfileService(OssCommandFactory commandFactory,
+                   ConfigSource configSource,
+                   ConfigKey<OssConfig> ossConfigKey,
+                   ConfigKey<UsbConfig> usbConfigKey,
+                   ApplicationEventPublisher eventPublisher,
+                   MeterRegistry meterRegistry,
+                   long maximumSize,
+                   Caffeine<Object, Object> builder) {
         this.commandFactory = commandFactory;
         this.configSource = configSource;
         this.ossConfigKey = ossConfigKey;
         this.usbConfigKey = usbConfigKey;
         this.eventPublisher = eventPublisher;
+        this.cache = builder.maximumSize(maximumSize)
+                .expireAfter(Expiry.<String, CachedProfile>writing((username, entry) -> entry.lifetime()))
+                .recordStats()
+                .buildAsync((username, executor) -> config().flatMap(cfg -> loadFromOss(username, cfg)
+                        .map(profile -> new CachedProfile(profile, Duration.ofMinutes(cfg.cacheTimeMin())))).toFuture());
         CaffeineCacheMetrics.monitor(meterRegistry, cache.synchronous(), "profileCache");
     }
 
-    @EventListener(ApplicationReadyEvent.class)
-    public void onReady() {
-        refreshCacheTtl();
-    }
-
-    @EventListener
-    public void onOssConfigChanged(OssConfigChangedEvent ignored) {
-        refreshCacheTtl();
-    }
+    private record CachedProfile(Profile profile, Duration lifetime) {}
 
     /**
      * Загружает профиль пользователя (с кэшем).
      */
     public Mono<Profile> load(String username) {
         return Mono.defer(() -> {
-            var currentCache = cache;
-            var pending = currentCache.get(username);
+            var pending = cache.get(username);
             // При повторном запросе после ошибки загружаем профиль заново.
             return Mono.fromFuture(pending, true)
-                    .doOnError(error -> currentCache.asMap().remove(username, pending));
+                    .doOnError(error -> cache.asMap().remove(username, pending))
+                    .map(CachedProfile::profile);
         });
     }
 
@@ -94,7 +104,7 @@ public class ProfileService {
      * Загружает профиль пользователя, минуя кэш.
      */
     public Mono<Profile> loadWithoutCache(String username) {
-        return loadFromOss(username);
+        return config().flatMap(cfg -> loadFromOss(username, cfg));
     }
 
     /**
@@ -120,51 +130,29 @@ public class ProfileService {
                         .setAttributes(attributes)
                         .build())
                 .flatMap(Command::execute)
-                .doOnSuccess(ignored -> invalidate(username))
+                .doOnNext(ignored -> invalidate(username))
                 .then();
     }
 
     /**
      * Полная инвалидация кэша профилей.
      */
+    @EventListener({OssConfigChangedEvent.class, UsbConfigChangedEvent.class})
     public void invalidateAll() {
-        log.warn("Вызвана инвалидация кэша профилей");
-        cache.synchronous().invalidateAll();
+        log.debug("Сброс кэша профилей");
+        cache.asMap().clear();
     }
 
     public void invalidate(String username) {
-        cache.synchronous().invalidate(username);
+        cache.asMap().remove(username);
     }
 
-    private void refreshCacheTtl() {
-        configSource.get(ossConfigKey)
-                .subscribe(config -> {
-                            var ttlMinutes = config.cacheTimeMin() > 0 ? config.cacheTimeMin() : DEFAULT_CACHE_TTL_MINUTES;
-                            if (ttlMinutes != cacheTtlMinutes) {
-                                cacheTtlMinutes = ttlMinutes;
-                                this.cache = buildCache(ttlMinutes);
-                                log.info("Кэш профилей пересоздан с TTL {} мин", ttlMinutes);
-                            }
-                        },
-                        error -> log.warn("Не удалось прочитать OssConfig для настройки кэша: {}", error.getMessage()));
-    }
-
-    private AsyncLoadingCache<String, Profile> buildCache(int ttlMinutes) {
-        return Caffeine.newBuilder()
-                .expireAfterAccess(ttlMinutes, TimeUnit.MINUTES)
-                .initialCapacity(1000)
-                .recordStats()
-                .buildAsync((username, executor) -> loadFromOss(username).toFuture());
-    }
-
-    private Mono<Profile> loadFromOss(String username) {
-        return config()
-                .flatMap(cfg -> Mono.zip(
-                                commandFactory.buildCommand(GetUserDetailsRequest.from(username))
-                                        .flatMap(Command::execute)
-                                        .switchIfEmpty(Mono.error(() -> new ProfileNotFoundException(username))),
-                                loadAuthorities(username, cfg))
-                        .map(tuple -> toProfile(tuple.getT1(), tuple.getT2(), username, cfg)))
+    private Mono<Profile> loadFromOss(String username, OssConfig cfg) {
+        var details = commandFactory.buildCommand(GetUserDetailsRequest.from(username))
+                .flatMap(Command::execute)
+                .switchIfEmpty(Mono.error(() -> new ProfileNotFoundException(username)));
+        return Mono.zip(details, loadAuthorities(username, cfg),
+                        (response, roles) -> toProfile(response, roles, username, cfg))
                 .doOnNext(profile -> eventPublisher.publishEvent(new ProfileLoadedEvent(profile)))
                 .doOnNext(profile -> log.trace("Получен пользователь из {}: [{}]", profile.login(), username));
     }
@@ -187,22 +175,29 @@ public class ProfileService {
     }
 
     private @NotNull Profile toProfile(GetUserInfoResponse response, List<String> roles, String username, OssConfig cfg) {
-        List<TUserInfo> userInfos = response.getUserInfos().getUserInfo();
-        TUserInfo primary = userInfos.stream()
-                .filter(Objects::nonNull)
-                .findFirst()
-                .orElseThrow(() -> new ProfileNotFoundException(username));
+        var infos = response.getUserInfos();
+        if (infos == null || username.isBlank()) {
+            throw new ProfileNotFoundException(username);
+        }
+        List<TUserInfo> userInfos = infos.getUserInfo().stream().filter(Objects::nonNull).toList();
+        if (userInfos.isEmpty()) {
+            throw new ProfileNotFoundException(username);
+        }
+        for (TUserInfo info : userInfos) {
+            var employee = info.getEmployee();
+            if (employee == null) {
+                throw new ProfileNotFoundException(username);
+            }
+            String reportedLogin = cfg.ossType() == OssConfig.OssType.USB
+                    ? employee.getSamAccountName()
+                    : employee.getLogin();
+            if (!username.equals(reportedLogin)) {
+                throw new ProfileNotFoundException(username);
+            }
+        }
 
-        TEmployee employee = primary.getEmployee();
-        List<Organization> organizations = userInfos.stream()
-                .filter(Objects::nonNull)
-                .map(Organization::from)
-                .toList();
-
-        String login = cfg.ossType() == OssConfig.OssType.USB
-                ? employee.getSamAccountName()
-                : employee.getLogin();
-
+        var employee = userInfos.getFirst().getEmployee();
+        List<Organization> organizations = userInfos.stream().map(Organization::from).toList();
         String orgName = null;
         String orgFullName = null;
         String activeOrgCode = null;
@@ -216,7 +211,7 @@ public class ProfileService {
         }
 
         return new Profile(
-                login,
+                username,
                 employee.getFullName(),
                 employee.getDepartmentName(),
                 employee.getTitleName(),

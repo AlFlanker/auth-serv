@@ -7,6 +7,7 @@ import com.otr.portal.config.source.ConfigKey;
 import com.otr.portal.config.source.ConfigSource;
 import com.otr.portal.oss.config.OssConfig;
 import com.otr.portal.oss.connector.OssConnection;
+import com.otr.portal.oss.exception.OssUnavailableException;
 import com.otr.portal.oss.userdetails.command.model.GetAuthoritiesRequest;
 import com.otr.portal.oss.userdetails.command.model.GetUserDetailsRequest;
 import com.otr.portal.oss.userdetails.command.model.ManageUserCustomAttributesRequest;
@@ -19,6 +20,7 @@ import ru.otr.hr.ws.organization.v3.SimpleResponse;
 import java.util.List;
 
 import static java.time.Duration.ofSeconds;
+import static org.springframework.util.StringUtils.hasText;
 
 /**
  * Фабрика команд ОШС (аналог монолитного {@code OssCommandFactory}).
@@ -71,17 +73,23 @@ public class OssCommandFactory {
 
     public Mono<Command<SimpleResponse>> buildCommand(ManageUserCustomAttributesRequest request) {
         log.trace("Создаём команду изменения кастомных атрибутов пользователя \"{}\"", request.getUsername());
-        return config().map(config -> ManageUserCustomAttributesCommand.builder()
-                .resilienceDecorator(resilienceDecorator)
-                .commandProperties(CommandProperties.builder()
-                        .timeout(ofSeconds(config.manageUserCustomAttributesTimeout()))
-                        .maxConcurrency(config.manageUserCustomAttributesMaxConcurrentRequests())
-                        .build())
-                .ossConnection(ossConnection)
-                .username(request.getUsername())
-                .setAttributesMap(request.getSetAttributes())
-                .sobiManageSecureKey(config.ossSecureKey())
-                .build());
+        return config().map(config -> {
+            if (config.ossType() == OssConfig.OssType.SOBI_WEB_SERVICE
+                    && !hasText(config.ossSecureKey())) {
+                throw new OssUnavailableException("Не настроен ключ редактирования атрибутов СОБИ");
+            }
+            return ManageUserCustomAttributesCommand.builder()
+                    .resilienceDecorator(resilienceDecorator)
+                    .commandProperties(CommandProperties.builder()
+                            .timeout(ofSeconds(config.manageUserCustomAttributesTimeout()))
+                            .maxConcurrency(config.manageUserCustomAttributesMaxConcurrentRequests())
+                            .build())
+                    .ossConnection(ossConnection)
+                    .username(request.getUsername())
+                    .setAttributesMap(request.getSetAttributes())
+                    .sobiManageSecureKey(config.ossSecureKey())
+                    .build();
+        });
     }
 
     private Mono<OssConfig> config() {

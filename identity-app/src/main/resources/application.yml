@@ -12,7 +12,7 @@ spring:
     name: identity-service
   threads:
     virtual:
-      enabled: true                                       # Schedulers.boundedElastic() -> VT
+      enabled: true
   datasource:
     url: jdbc:postgresql://localhost:5432/identity
     username: identity
@@ -32,12 +32,14 @@ management:
     tracing:
       export:
         otlp:
-          enabled: true
-          endpoint: http://eb-skp-portal-test.otr.ru:4317
+          endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:http://localhost:4317}
           transport: grpc
   tracing:
+    export:
+      otlp:
+        enabled: false
     sampling:
-      probability: 1.0
+      probability: 0.1
   endpoints:
     web:
       exposure:
@@ -45,6 +47,11 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db,ssoConfiguration
 
 # =============================================================================
 # Логирование
