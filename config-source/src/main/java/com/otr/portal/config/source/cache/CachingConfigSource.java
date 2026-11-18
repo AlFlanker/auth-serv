@@ -19,7 +19,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
-import static java.util.Optional.ofNullable;
 import static java.util.function.Function.identity;
 import static java.util.stream.Collectors.toMap;
 
@@ -106,7 +105,7 @@ public class CachingConfigSource implements WatchableConfigSource, DisposableBea
         }
         return changes.asFlux()
                 .filter(change ->
-                        change.key().startsWith(keyPrefix));
+                        change.type() == ConfigChangeType.SYNC || change.key().startsWith(keyPrefix));
     }
 
     @Override
@@ -121,12 +120,18 @@ public class CachingConfigSource implements WatchableConfigSource, DisposableBea
     }
 
     /**
-     * Загрузка при промахе кэша. Типизированные представления читают строку через {@link #get(String)},
-     * то есть из строкового кэша: после push-обновления перепарсинг не ходит в источник.
+     * При промахе получаем последнюю версию значения у источника.
      */
     private <T> CompletableFuture<Object> load(String key, Class<T> type, Function<String, T> parser) {
-        Mono<String> raw = delegate.get(key);
-        return raw.<Object>map(parser).toFuture();
+        return delegate.get(key).<Object>map(raw -> {
+            try {
+                return parser.apply(raw);
+            } catch (RuntimeException failure) {
+                // Caffeine журналирует исключения асинхронной загрузки вместе со всей цепочкой причин.
+                throw new IllegalArgumentException("Не удалось разобрать ключ '%s' как %s (%s)"
+                        .formatted(key, type.getSimpleName(), failure.getClass().getSimpleName()));
+            }
+        }).toFuture();
     }
 
     private void ensureWatching() {
@@ -137,14 +142,16 @@ public class CachingConfigSource implements WatchableConfigSource, DisposableBea
                         delegate.watch(properties.getWatchPrefix()))
                 .concatWith(Mono.error(() ->
                         new IllegalStateException("Watch-поток источника конфигурации завершился")))
+                .doOnNext(this::applyAndPublish)
                 .retryWhen(Retry.backoff(Long.MAX_VALUE, properties.getWatchRetryBackoff())
                         .maxBackoff(properties.getWatchRetryMaxBackoff())
                         .doBeforeRetry(signal -> log.warn(
-                                "Watch-поток источника конфигурации оборван, переподключение (попытка {})",
-                                signal.totalRetries() + 1, signal.failure())))
+                                "Watch-поток источника конфигурации оборван, переподключение (попытка {}, {})",
+                                signal.totalRetries() + 1, signal.failure().getClass().getSimpleName())))
                 .subscribe(
-                        this::applyAndPublish,
-                        error -> log.error("Watch-поток источника конфигурации остановлен окончательно", error)
+                        ignored -> {},
+                        error -> log.error("Watch-поток источника конфигурации остановлен окончательно ({})",
+                                error.getClass().getSimpleName())
                 );
         watchSubscription.set(subscription);
         if (destroyed) {
@@ -155,13 +162,13 @@ public class CachingConfigSource implements WatchableConfigSource, DisposableBea
     private void applyAndPublish(ConfigChange change) {
         if (change.type() == ConfigChangeType.SYNC) {
             resync();
-            return; // инфраструктурный сигнал, подписчикам не транслируется
-        }
-        if (change.type() == ConfigChangeType.DELETE) {
+        } else {
+            // Для одного ключа могли закэшироваться String, DTO и ещё незавершённые чтения.
             invalidateAllRepresentations(change.key());
-            log.trace("Кеш инвалидирован из наблюдателя: key={}", change.key());
-        } else if (change.value() != null) {
-            parseTrackedRepresentations(change.key(), change.value());
+            if (change.type() == ConfigChangeType.PUT && change.value() != null) {
+                cache.synchronous().put(new CacheKey(change.key(), String.class), change.value());
+                parseTrackedRepresentation(change.key(), change.value());
+            }
         }
         publish(change);
     }
@@ -174,9 +181,7 @@ public class CachingConfigSource implements WatchableConfigSource, DisposableBea
      * Источник без SYNC деградирует мягко: без предзагрузки, устаревание ограничено TTL.
      */
     private void resync() {
-        cache
-                .synchronous()
-                .invalidateAll();
+        cache.asMap().clear();
         preloadTrackedKeys();
         log.debug("Кэш ресинхронизирован по точке синхронизации watch-потока");
     }
@@ -191,34 +196,26 @@ public class CachingConfigSource implements WatchableConfigSource, DisposableBea
                 .forEach(key -> get(key)
                         .subscribe(
                                 ignored -> log.debug("Отслеживаемый ключ '{}' предзагружен в кэш", key.key()),
-                                error -> log.warn("Не удалось предзагрузить отслеживаемый ключ '{}'", key.key(), error)));
+                                error -> log.warn("Не удалось предзагрузить отслеживаемый ключ '{}' ({})",
+                                        key.key(), error.getClass().getSimpleName())));
     }
 
-    private void parseTrackedRepresentations(String key, String value) {
-        ofNullable(trackedKeys.get(key))
-                .ifPresent(configKey -> {
-                    if (configKey.type() != String.class) {
-                        try {
-                            Object parsed = configKey.parser()
-                                    .apply(value);
-                            cache.synchronous()
-                                    .put(new CacheKey(key, configKey.type()), parsed);
-                            log.trace("Кэш обновлён из наблюдателя: key={}, valueLength={}",
-                                    key, value.length());
-                        } catch (RuntimeException error) {
-                            log.error("Не удалось десериализовать обновление ключа '{}' в {}",
-                                    key, configKey.type().getName(), error);
-                        }
-                    } else {
-                        cache.synchronous()
-                                .put(new CacheKey(key, configKey.type()), value);
-                    }
-                });
+    private void parseTrackedRepresentation(String key, String value) {
+        var tracked = trackedKeys.get(key);
+        if (tracked == null || tracked.type() == String.class) {
+            return;
+        }
+        try {
+            Object parsed = tracked.parser().apply(value);
+            cache.synchronous().put(new CacheKey(key, tracked.type()), parsed);
+        } catch (RuntimeException error) {
+            log.error("Не удалось десериализовать обновление ключа '{}' в {} ({})",
+                    key, tracked.type().getName(), error.getClass().getSimpleName());
+        }
     }
 
     private void invalidateAllRepresentations(String key) {
-        cache.synchronous().asMap().keySet()
-                .removeIf(cacheKey -> cacheKey.key().equals(key));
+        cache.asMap().keySet().removeIf(cacheKey -> cacheKey.key().equals(key));
     }
 
     private void publish(ConfigChange change) {

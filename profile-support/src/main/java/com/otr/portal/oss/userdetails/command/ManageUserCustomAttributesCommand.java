@@ -2,10 +2,11 @@ package com.otr.portal.oss.userdetails.command;
 
 import com.otr.portal.command.AbstractResilienceCommand;
 import com.otr.portal.command.CommandResilienceDecorator;
+import com.otr.portal.command.ResilienceFailures;
 import com.otr.portal.command.config.CommandProperties;
 import com.otr.portal.oss.connector.OssConnection;
+import com.otr.portal.oss.exception.OssUnavailableException;
 import lombok.Builder;
-import lombok.extern.slf4j.Slf4j;
 import org.jetbrains.annotations.NotNull;
 import reactor.core.publisher.Mono;
 import ru.otr.hr.ws.organization.v3.ManageUserCustomAttributesRequest;
@@ -20,7 +21,6 @@ import static java.util.stream.Collectors.toList;
 /**
  * Команда изменения кастомных атрибутов пользователя (аналог монолитной {@code ManageUserCustomAttributesCommand}).
  */
-@Slf4j
 public class ManageUserCustomAttributesCommand extends AbstractResilienceCommand<SimpleResponse> {
 
     public static final String COMMAND_NAME = "OSS.manageUserCustomAttributes";
@@ -40,7 +40,6 @@ public class ManageUserCustomAttributesCommand extends AbstractResilienceCommand
         super(resilienceDecorator, commandProperties);
         requireNonNull(username, "Свойство username необходимо указать");
         requireNonNull(ossConnection, "Зависимость OssConnection необходимо указать");
-        requireNonNull(sobiManageSecureKey, "Свойство sobiManageSecureKey необходимо указать");
         requireNonNull(setAttributesMap, "Свойство setAttributesMap необходимо указать");
         this.ossConnection = ossConnection;
         this.setAttributesMap = setAttributesMap;
@@ -55,15 +54,20 @@ public class ManageUserCustomAttributesCommand extends AbstractResilienceCommand
 
     @Override
     protected Mono<SimpleResponse> doExecute() {
-        return this.ossConnection.manageUserCustomAttributesV1(prepareRequest())
-                .doOnSuccess(this::logResponse);
+        return Mono.defer(() -> ossConnection.manageUserCustomAttributesV1(prepareRequest()))
+                .switchIfEmpty(Mono.error(() -> new OssUnavailableException(
+                        "Источник не вернул подтверждение обновления атрибутов")));
     }
 
     @Override
     protected Mono<SimpleResponse> fallbackOnError(Throwable e) {
-        log.error("Ошибка выполнения запроса редактирования кастомных атрибутов для пользователя {} в ОШС",
-                this.username, e);
-        return Mono.empty();
+        if (e instanceof UnsupportedOperationException || e instanceof OssUnavailableException) {
+            return Mono.error(e);
+        }
+        return switch (ResilienceFailures.classify(e)) {
+            case TIMEOUT, CIRCUIT_OPEN, BULKHEAD_FULL -> Mono.error(e);
+            default -> Mono.error(new OssUnavailableException("Ошибка обновления атрибутов в источнике профилей", e));
+        };
     }
 
     private @NotNull ManageUserCustomAttributesRequest prepareRequest() {
@@ -85,10 +89,4 @@ public class ManageUserCustomAttributesCommand extends AbstractResilienceCommand
         return item;
     }
 
-    private void logResponse(SimpleResponse response) {
-        if (log.isTraceEnabled()) {
-            log.trace("Запрос управления пользовательскими атрибутами для \"{}\" успешно выполнен, результат: {}",
-                    this.username, response.getResult());
-        }
-    }
 }
