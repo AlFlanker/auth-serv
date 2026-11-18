@@ -88,6 +88,7 @@ public class OssBackendFactory {
             case SOBI_WEB_SERVICE -> buildSobiWsBackend(url);
             case SOBI_REST -> Mono.just(new SobiRestBackend());
             case USB -> configSource.get(usbConfigKey)
+                    .switchIfEmpty(Mono.error(new IllegalStateException("Конфигурация UsbConfig не найдена в etcd")))
                     .map(usbConfig -> new UsbRestBackend(ossWebClient, url, usbConfig, usbProperties));
         };
     }

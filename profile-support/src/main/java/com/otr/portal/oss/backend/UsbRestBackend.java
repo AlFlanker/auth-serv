@@ -27,7 +27,6 @@ import ru.otr.hr.ws.organization.v3.TUserInfo;
 import ru.otr.hr.ws.organization.v3.TUserInfos;
 
 import java.util.List;
-import java.util.Objects;
 
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static java.util.Collections.emptyList;
@@ -58,7 +57,6 @@ public class UsbRestBackend implements OssBackend {
     public Mono<GetUserInfoResponse> getUserInfoV1(GetUserInfoRequest userRequest) {
         var login = userRequest.getLogin();
         return requestUserDetails(login)
-                .filter(Objects::nonNull)
                 .map(response -> map(response, login));
     }
 

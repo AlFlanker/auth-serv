@@ -5,14 +5,19 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
+import org.springframework.security.core.userdetails.User;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.provisioning.JdbcUserDetailsManager;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.reactive.server.WebTestClient;
+
+import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * Интеграционный тест контура локальных пользователей и ролей на H2:
- * схема, bootstrap user/123, проверка пароля, API ролей.
+ * схема, проверка пароля, API ролей.
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -24,6 +29,12 @@ class UsersIntegrationTest {
     @Autowired
     private ApplicationContext applicationContext;
 
+    @Autowired
+    private DataSource dataSource;
+
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+
     private WebTestClient client;
 
     @BeforeEach
@@ -32,15 +43,20 @@ class UsersIntegrationTest {
     }
 
     @Test
-    void bootstrap_createsDefaultUsersWithRoles() {
-        assertThat(localUserService.exists("user")).isTrue();
-        assertThat(localUserService.exists("user2")).isTrue();
+    void authenticatesOnlyProvisionedEnabledAccounts() {
+        assertThat(localUserService.exists("user")).isFalse();
+        assertThat(localUserService.exists("user2")).isFalse();
+        var users = new JdbcUserDetailsManager(dataSource);
+        var user = User.withUsername("test-admin")
+                .password(passwordEncoder.encode("test-password")).roles("ADMIN").build();
+        users.createUser(user);
 
-        var roles = localUserService.verify("user", "123");
-        assertThat(roles).contains("ROLE_ADMIN", "ROLE_USER");
-
-        assertThat(localUserService.verify("user", "wrong")).isNull();
-        assertThat(localUserService.verify("nobody", "123")).isNull();
+        assertThat(localUserService.verify("test-admin", "test-password")).containsExactly("ROLE_ADMIN");
+        assertThat(localUserService.verify("test-admin", "wrong")).isNull();
+        assertThat(localUserService.verify("nobody", "test-password")).isNull();
+        users.updateUser(User.withUserDetails(user).disabled(true).build());
+        assertThat(localUserService.verify("test-admin", "test-password")).isNull();
+        assertThat(localUserService.authorities("test-admin")).isNull();
     }
 
     @Test
