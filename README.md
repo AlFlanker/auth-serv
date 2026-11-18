@@ -2,7 +2,7 @@
 
 Перенос ответственностей монолита fk-portal: аутентификация по SSO-заголовку, сбор профиля и ролей
 из ОШС (SOAP) / ЮСБ (REST), локальные администраторы, выпуск JWT (JWKS) для portal-edge и других сервисов.
-Проектные документы — в [docs/](docs/README.md) (ADR-01, ADR-02, объём выноса и статус реализации).
+Для запуска см. [настройки приложения](docs/configuration.md). Для интеграции см. [функции сервиса и пример бизнес-процесса](docs/functions.md). Архитектурные решения и статус миграции собраны в [индексе документации](docs/README.md).
 
 ## Стек
 
@@ -54,8 +54,7 @@ java -jar identity-app\build\libs\identity-app-0.0.1-SNAPSHOT.jar
 Перед запуском укажите путь к ключу подписи в настройках Spring Boot. Пример приведён в разделе «Ключи и ротация». Для изолированной локальной разработки можно явно включить `identity.token.keys.ephemeral=true`: при каждом таком запуске потребуется новый вход.
 
 Необходимы etcd (конфиги сервиса) и PostgreSQL (пользователи/роли/токены, см. `spring.datasource.*` в application.yml).
-Схема БД мигрируется **Flyway** при старте (`identity-app/src/main/resources/db/migration`; для БД,
-где таблицы уже существовали, включён `spring.flyway.baseline-on-migrate`).
+При старте **Flyway** применяет [миграции](identity-app/src/main/resources/db/migration). Для существующей непустой схемы без истории миграций сервис включает `baselineOnMigrate(true)` в [конфигурации Flyway](identity-app/src/main/java/com/otr/portal/identity/config/FlywayConfiguration.java).
 
 ## Конфигурация
 
@@ -96,6 +95,7 @@ Prometheus получает метрики по `/actuator/prometheus`. Чтоб
 | `GET /.well-known/jwks.json` | Публичные ключи подписи (JWKS) |
 | `POST /api/internal/v1/users/{login}/profile` | Профиль + роли + организации (внутренний API, заголовок `X-Internal-Key`) |
 | `POST /api/internal/v1/users/{login}/groups` | Роли пользователя (внутренний API) |
+| `POST /api/internal/v1/users/organizations/{login}` | Организации пользователя из профиля (внутренний API) |
 | `POST /api/internal/v1/users/{login}/custom-attributes` | Редактирование кастомных полей (внутренний API, ОШС) |
 | `GET /roles`, `GET /roles/{id}` | Локальные роли |
 
