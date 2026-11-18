@@ -70,8 +70,7 @@ logging:
 # =============================================================================
 identity:
   internal:
-    require-api-key: ${IDENTITY_INTERNAL_REQUIRE_API_KEY:true}
-    api-key: ${IDENTITY_INTERNAL_API_KEY:}                # При обязательной проверке пустой ключ закрывает доступ
+    api-key: ${IDENTITY_INTERNAL_API_KEY:}                # При пустом ключе внутренний API закрыт
   token:
     ttl: 30m                                             # Время жизни access-токена
     issuer: https://identity-service                     # iss (URL-форма)

@@ -56,7 +56,7 @@ class CustomAttributesIntegrationTest {
         var profiles = new ProfileService(commands, config, ossKey, usbKey, event -> {}, meter, 100);
         client = WebTestClient.bindToController(new InternalProfileController(profiles))
                 .controllerAdvice(new InternalApiExceptionHandler())
-                .webFilter(new InternalApiKeyWebFilter(true, "test-key"))
+                .webFilter(new InternalApiKeyWebFilter("test-key"))
                 .build();
         configure(OssConfig.OssType.SOBI_WEB_SERVICE, "test-manage-key", soap);
 

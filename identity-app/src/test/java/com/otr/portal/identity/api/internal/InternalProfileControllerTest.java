@@ -27,7 +27,7 @@ class InternalProfileControllerTest {
 
     private final WebTestClient client = WebTestClient.bindToController(controller)
             .controllerAdvice(new InternalApiExceptionHandler())
-            .webFilter(new InternalApiKeyWebFilter(true, API_KEY))
+            .webFilter(new InternalApiKeyWebFilter(API_KEY))
             .build();
 
     @Test
