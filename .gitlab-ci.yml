@@ -1,0 +1,126 @@
+stages:
+  - build
+  - build-docker
+  - deploy-to-nexus
+variables:
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+  PROJECT_URL: https://gl-sk-prod.otr.ru/fk-portal/portal-services/identity-service.git
+  # ВАЖНО: репозиторий Nexus уточнить (lk-mart взят из nav-composer как образец)
+  NEXUS_URL: https://nexus.otr.ru/content/repositories/lk-mart/identity-service
+  RUN_TESTS_ON_TAGS: "true"
+
+# Кэширование для ускорения сборки (включая дистрибутив Gradle из wrapper)
+cache:
+  key: $CI_JOB_NAME
+  paths:
+    - $CI_PROJECT_DIR/.gradle
+    - build/
+
+# Базовый образ для всех джобов.
+# Gradle НЕ используется из образа: сборка идёт через ./gradlew (wrapper, версия 9.6.0 из репозитория),
+# от образа нужен только JDK 25.
+default:
+  image: cr-sk-prod.otr.ru:5005/registry/docker-images/gradle:9.1.0-jdk25-alpine-node24.4.1
+  before_script:
+    - export GRADLE_USER_HOME="$CI_PROJECT_DIR/.gradle"
+
+# Глобальные правила запуска pipeline
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG # релиз по тегу
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event" # CI на MR
+
+# Сборка проекта
+build:
+  stage: build
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  script:
+    - echo "Сборка проекта..."
+    - sh gradlew clean build
+    - echo "Сборка завершена успешно"
+  artifacts:
+    paths:
+      - "**/build/libs/*.jar"
+      - "**/build/libs/*.war"
+      - "**/build/test-results/"
+      - "**/build/reports/"
+  coverage: '/Total.*?([0-9]{1,3})%/'
+
+# Релизная сборка по тегу с извлечением версии из тега tag-0.0.N
+build_release:
+  stage: build
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - |
+      echo "Release build for tag: $CI_COMMIT_TAG"
+      # Валидируем формат тега и извлекаем версию
+      if [[ ! "$CI_COMMIT_TAG" =~ ^tag-[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Tag format must be tag-X.Y.Z, got: $CI_COMMIT_TAG"
+        exit 1
+      fi
+      VERSION="${CI_COMMIT_TAG#tag-}"
+      echo "Resolved VERSION=$VERSION"
+
+      # Решение по тестам на тегах
+      if [[ "$RUN_TESTS_ON_TAGS" == "true" ]]; then
+        echo "Running tests on tag build"
+        sh gradlew clean build -PreleaseVersion="$VERSION"
+      else
+        echo "Skipping tests on tag build"
+        sh gradlew clean build -x test -PreleaseVersion="$VERSION"
+      fi
+    - echo $VERSION > version.env
+    - cat version.env
+    - ls -lah **/build/libs/
+  artifacts:
+    paths:
+      - "**/build/libs/*.jar"
+      - "**/build/test-results/"
+      - "**/build/reports/"
+      - "version.env"
+
+build-docker:
+  image: gl-sk-prod.otr.ru:5005/registry/docker-images/dind:25.0.5
+  stage: build-docker
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - export TAG=$(cat version.env)
+    - echo "TAG=$TAG"
+    - SOURCE_FILE=identity-app-${CI_COMMIT_TAG#tag-}.jar
+    - echo "SOURCE_FILE=$SOURCE_FILE"
+    - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u $CI_REGISTRY_USER --password-stdin
+    - echo "Сборка образа..."
+    - echo "CI_PROJECT_DIR=$CI_PROJECT_DIR"
+    - ls -la Dockerfile
+    - docker --debug buildx build -t $CI_REGISTRY_IMAGE/identity-service:$TAG  --build-arg SOURCE_FILE=$SOURCE_FILE . -f Dockerfile
+    - docker push $CI_REGISTRY_IMAGE/identity-service:$TAG
+  artifacts:
+    paths:
+      - "version.env"
+
+deploy-to-nexus:
+  stage: deploy-to-nexus
+  cache: []
+  image: cr-sk-prod.otr.ru:5005/registry/docker-images/alpine-bash-git:latest
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - |
+      if [[ ! "$CI_COMMIT_TAG" =~ ^tag-[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "Tag format must be tag-X.Y.Z, got: $CI_COMMIT_TAG"
+        exit 1
+      fi
+      VERSION="${CI_COMMIT_TAG#tag-}"
+      echo "Resolved VERSION=$VERSION"
+      echo "=== Артефакты, найденные для загрузки ==="
+      find identity-app/build/libs/ -type f \( -name '*.jar' -o -name '*.war' \) -print
+      echo "Upload artifacts to $NEXUS_URL/$VERSION/"
+      echo "=== Загружаем артефакты в Nexus ==="
+    - find identity-app/build/libs/ -name '*.jar' -type f -exec curl -u $NEXUS_USER:$NEXUS_PASS -T {} $NEXUS_URL/$VERSION/ \;
+  retry: 2
+  artifacts:
+    paths:
+      - "version.env"

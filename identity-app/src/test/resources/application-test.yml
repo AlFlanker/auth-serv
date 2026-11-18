@@ -1,0 +1,22 @@
+# =============================================================================
+# Тестовый профиль: H2 in-memory
+# =============================================================================
+spring:
+  datasource:
+    url: jdbc:h2:mem:identity;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+
+etcd:
+  startup:
+    verify-connection: false
+
+config:
+  source:
+    cache:
+      enabled: false
+
+logging:
+  level:
+    com.otr.portal: INFO

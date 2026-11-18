@@ -1,0 +1,118 @@
+# =============================================================================
+# Основные настройки сервера
+# =============================================================================
+server:
+  port: 8091
+
+# =============================================================================
+# Настройки Spring Boot
+# =============================================================================
+spring:
+  application:
+    name: identity-service
+  threads:
+    virtual:
+      enabled: true                                       # Schedulers.boundedElastic() -> VT
+  datasource:
+    url: jdbc:postgresql://localhost:5432/identity
+    username: identity
+    password: identity
+    hikari:
+      maximum-pool-size: 10
+
+# =============================================================================
+# Management / Actuator
+# =============================================================================
+management:
+  otlp:
+    metrics:
+      export:
+        enabled: false
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          enabled: true
+          endpoint: http://eb-skp-portal-test.otr.ru:4317
+          transport: grpc
+  tracing:
+    sampling:
+      probability: 1.0
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,env,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+
+# =============================================================================
+# Логирование
+# =============================================================================
+logging:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+  level:
+    com.otr.portal: INFO
+    com.otr.portal.etcd.ReactiveEtcdClient: TRACE
+    com.otr.portal.config.source.etcd.EtcdConfigSource: TRACE
+    com.otr.portal.config.source.cache.CachingConfigSource: TRACE
+
+# =============================================================================
+# identity-service: внутренний API и USS
+# =============================================================================
+identity:
+  internal:
+    api-key: change-me                                   # Общий ключ внутреннего API (заголовок X-Internal-Key); в проде — секрет
+  token:
+    ttl: 30m                                             # Время жизни access-токена
+    issuer: https://identity-service                     # iss (URL-форма)
+    key-id: identity-1                                   # kid ключа подписи (ротация ключей — позже)
+
+admin:
+  security:
+    usb:                                                 # Аналог UsbProperties монолита (application.yml)
+      application-code: ETD_PORTAL
+      resource-type-code: ETD_ROLE
+      operation-code: ACCESS
+
+# =============================================================================
+# Конфигурация ConfigSource — чтение конфигов из ETCD с кэшированием
+# =============================================================================
+config:
+  source:
+    etcd:
+      key-prefix: "fk-portal/"                             # Префикс ключей внутри ETCD (аналог appName + "/")
+      timeout: 10s                                          # Таймаут одной операции чтения из ETCD
+      watch-require-leader: true                            # Требовать лидера кластера для watch
+    cache:
+      enabled: true                                         # Включить кэширование поверх ConfigSource
+      watch-prefix: ""                                      # Логический префикс ключей для сброса кэша (пусто = весь диапазон)
+      maximum-size: 10000                                   # Максимальное количество записей в кэше
+      expire-after-write: 10m                               # Время жизни записи в кэше
+      watch-retry-backoff: 5s                               # Начальная задержка переподключения watch
+      watch-retry-max-backoff: 1m                           # Максимальная задержка переподключения watch
+
+# =============================================================================
+# Настройки ETCD-клиента (jetcd)
+# =============================================================================
+etcd:
+  endpoints:                                                # Адреса нод ETCD (схема + хост + порт)
+    - http://localhost:2379
+  # user:                                                   # Имя пользователя RBAC
+  # password:                                               # Пароль RBAC
+  # namespace:                                              # Namespace для всех ключей клиента
+  # authority:                                              # gRPC authority (SNI/Host)
+  # load-balancer-policy:                                   # Политика балансировки: round_robin | pick_first
+  # connect-timeout:                                        # Таймаут установки соединения
+  # keep-alive-time:                                        # Период keep-alive ping
+  # keep-alive-timeout:                                     # Таймаут ответа на keep-alive ping
+  # keep-alive-without-calls:                               # Отправлять keep-alive при отсутствии активных вызовов
+  # wait-for-ready:                                         # Ждать готовности канала вместо немедленной ошибки
+  # max-inbound-message-size:                               # Максимальный размер входящего gRPC-сообщения (байт)
+  startup:
+    verify-connection: false                                # Проверять доступность ETCD при старте
+    retry-attempts: 3                                       # Количество попыток проверки при старте
+    retry-backoff: 5s                                       # Начальная задержка между попытками
+    retry-max-backoff: 10s                                  # Максимальная задержка между попытками
+    timeout: 5s                                             # Таймаут одной попытки проверки
