@@ -35,7 +35,7 @@ import java.util.concurrent.TimeUnit;
 import static java.util.Collections.emptyList;
 
 /**
- * Фасад сбора профиля и ролей пользователя из ОШС/ЮСБ — полностью реактивный аналог
+ * Фасад сбора профиля и ролей пользователя из ОШС/ЮСБ - полностью реактивный аналог
  * монолитного {@code OSSUserDetailsService} (без Spring Security и сессий).
  */
 @Slf4j

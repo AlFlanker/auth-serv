@@ -50,8 +50,10 @@ java -jar identity-app\build\libs\identity-app-0.0.1-SNAPSHOT.jar
 ```
 
 Необходимы: etcd (конфиги сервиса) и PostgreSQL (пользователи/роли/токены, см. `spring.datasource.*` в application.yml).
-Схема БД мигрируется **Flyway** при старте (`identity-app/src/main/resources/db/migration`; для БД,
-где таблицы уже существовали, включён `spring.flyway.baseline-on-migrate`).
+Схема БД мигрируется **Flyway** при старте (`identity-app/src/main/resources/db/migration`, бин — `FlywayConfiguration`:
+в Spring Boot 4 автоконфигурации Flyway нет). Для БД, где таблицы уже существовали, включён `baselineOnMigrate`:
+такая БД помечается как «V1 применена» без выполнения `V1__init.sql`, поэтому изменения схемы оформляются
+только новыми миграциями (`V2__…`).
 
 ## Конфигурация
 
@@ -84,6 +86,15 @@ DTO содержат только необходимые сервису поля
 
 Claims JWT: `sub`, `username`, `roles[]`, `org_guid`, `org_code`, `auth_source`, `iss`, `jti`, `iat`, `exp`.
 Подпись: RS256; ключ генерируется при старте (kid `identity-1`), загрузка из PEM/secret-manager — харденинг.
+
+## Мониторинг
+
+Actuator на том же порту (`management.endpoints.web.exposure.include` в application.yml):
+`/actuator/health`, `/actuator/info`, `/actuator/metrics`, `/actuator/env`, `/actuator/prometheus`.
+
+Скрейп Prometheus — `metrics_path: /actuator/prometheus`, порт сервиса (8091).
+Эндпоинт появляется только при наличии `io.micrometer:micrometer-registry-prometheus` в зависимостях
+(в `identity-app/build.gradle.kts`); экспорт метрик по OTLP выключен (`management.otlp.metrics.export.enabled=false`).
 
 ## Открытые пункты (харденинг)
 
