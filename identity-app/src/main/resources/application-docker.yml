@@ -23,9 +23,13 @@ etcd:
 identity:
   internal:
     api-key: ${IDENTITY_INTERNAL_API_KEY:change-me}   # Должен совпадать с admin.identity-service.api-key монолита
+  auth:
+    local-password-enabled: ${IDENTITY_AUTH_LOCAL_PASSWORD_ENABLED:true}  # Локальный стенд: вход user/123
   token:
+    key-id: ${IDENTITY_TOKEN_KEY_ID:identity-dev-01}   # kid активного ключа подписи
     keys:
-      ephemeral: true                                 # Ключ на каждый запуск (при перезапуске нужен новый вход)
+      ephemeral: ${IDENTITY_TOKEN_EPHEMERAL:false}     # Постоянный ключ с хоста (volume в docker compose)
+      private-key: ${IDENTITY_TOKEN_PRIVATE_KEY:/identity-service/keys/identity-dev-01.pem}
 
 # =============================================================================
 # Трассы: Jaeger в том же compose (OTLP gRPC, порт 4317)

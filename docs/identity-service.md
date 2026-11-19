@@ -172,7 +172,7 @@
 - Инвалидация кэша (`/api/v1/userinfo/cache/invalidate`) во внешнем режиме вызывает `/api/internal/v1/users/cache/invalidate`.
 - Откат — выключить переключатель (без правок БД/etcd); `OssConfigChangedEvent` пересоздаёт WebClient клиента без рестарта.
 
-**Локальный запуск (docker compose).** Сервис добавлен в compose-стенд портала (`solutions/fk-portal/docker-compose.yml`: сервисы `identity-service` и `jaeger`); профиль `docker` (`application-docker.yml`) подключается к уже работающим на хосте etcd/PostgreSQL через host-gateway, ключ подписи — ephemeral, трассы — все в Jaeger (UI `http://localhost:16686`). Запуск: `docker compose build identity-service` → `docker compose up -d jaeger` → `docker compose up -d --no-deps identity-service`.
+**Локальный запуск (docker compose).** Сервис добавлен в compose-стенд портала (`solutions/fk-portal/docker-compose.yml`: сервисы `identity-service` и `jaeger`); профиль `docker` (`application-docker.yml`) подключается к уже работающим на хосте etcd/PostgreSQL через host-gateway, постоянный ключ подписи JWT монтируется с хоста (`C:\Users\AlexFlanker\AppData\Local\identity-service\keys`, по умолчанию `identity-dev-01.pem`, kid `identity-dev-01`), локальный вход `user/123` включён, трассы — все в Jaeger (UI `http://localhost:16686`). Запуск: `docker compose build identity-service` → `docker compose up -d jaeger` → `docker compose up -d --no-deps identity-service`.
 
 ### 3. Локальные админы и роли (PostgreSQL)
 
@@ -190,6 +190,30 @@
 - `GET /.well-known/jwks.json` публикует активный и дополнительные открытые ключи с настраиваемым сроком кэширования.
 
 Порядок ротации и перехода с первой версии описан в [README](../README.md#ключи-и-ротация).
+
+## Недостающие функции: кому и зачем (статус 19.11.2026)
+
+Ядро для целевого контура готово: единый формат claims, JWKS с ротацией, выпуск/обмен/отзыв JWT
+(реестр в БД), сбор профиля/ролей из ОШС/ЮСБ с кэшем и `cacheHit`, внутренний API за `X-Internal-Key`,
+интеграция с монолитом за feature-toggle, локальные пользователи/роли (чтение), конфиги из etcd.
+
+До полного катофа (шаги 4–5 миграции, ADR-02) не хватает:
+
+| № | Функция | Кому и зачем |
+|---|---|---|
+| 1 | Разовый/ротируемый `AUTH_TOKEN` для админ-контура | portal-edge: проверка доступа к `/admin` в jwt-режиме вместо статического токена на JVM монолита (`TokenAuthFilter`), печатаемого в лог |
+| 2 | Публичные профильные эндпоинты `/user/current/profile` (+`/workphone`, POST кастомных полей), `/user/current/profile/organizations`, `/organizations/active`, `/currentuser`, `/admin/currentuser` | внешние URL должны остаться без изменений: их проксирует portal-edge в identity-service; без них после катофа ломаются UI профиля и выбор организации |
+| 3 | Активная организация мультиорганизационных пользователей (хранение выбора, GET/PUT active, cookie `ACTIVE_ORG`, выдача `org_guid`/`org_code` в claims) | portal-edge — заголовок «код СВР» бэкендам (`ActiveOrgHeaderEnricher`); portal-app — `/document-link` (org-GUID для УФОС) и обогащение тикетов (`ELKProblemReportEnricher`) |
+| 4 | Админ-API локальных пользователей и ролей: CRUD пользователей (`UsersController`/`UserService`), ролей и назначений (`RolesController`/`UserRoleService`) | portal-app: админ-UI остаётся в Common, данные — в identity-service; сейчас есть только bootstrap-пользователи и чтение ролей (`GET /roles`, `/roles/{id}`) |
+| 5 | Канал аудита входов/выпуска/обмена/отзыва токенов (kafka/rabbit/API) | portal-app (server-audit, `AdminAuditEventMapper`): журнал входов продолжает работать после выноса аутентификации |
+| 6 | SSO-logout контур: `PoibLogoutUrlResolver`, `SsoLogoutUrlResolver` (`/prepare-logout`, `/end-logout`), `UfosLogoutHandler` (logout УФОС, из `ufos-support`) | внешние `/login`, `/logout`, `/prepare-logout`, `/end-logout` остаются без изменений; сейчас есть только отзыв JWT — без резолверов завершение SSO-сессии ломается |
+| 7 | Клиентские сертификаты (`CertificateUtils`/`CertificateUtilsImpl`, `PortalHttpsChannelFilter`) | контур с сертификатной аутентификацией — «сертификаты» в зоне identity-service по ADR-02 |
+| 8 | Харденинг: mTLS внутреннего API и rate-limiting на `/api/v1/token` | прод-эксплуатация: потребителей внутреннего API становится несколько (edge, portal-app, nav-composer) — общий ключ слабая защита; `/api/v1/token` — точка перебора |
+| 9 | Распределённый кэш профилей (Redis/gRPC, ADR-01) поверх локального Caffeine | несколько реплик: общий кэш снимает рассинхрон профилей/ролей между репликами и лишнюю нагрузку на ОШС/ЮСБ; сейчас сквозная инвалидация — ручная (`cache/invalidate`) |
+| 10 | Переработка JWT у nav-composer (вне identity-service, но блокирует единый формат) | nav-composer пока принимает отладочный HMAC-формат (`NavComposerJwtFactory`: `username`, `roles`, `requestScheme`); целевой — верификация по JWKS identity-service или приём проверенного JWT от edge, иначе единый формат claims не доходит до проверок доступа |
+
+Не входят в identity-service и уходят в другие контуры (по ADR-02): локальные URL-правила `CheckRoutesFilter`
+(portal-edge), проверки доступности ресурсов СПИ/ЮСБ (nav-composer), sticky-сессии и отдача UI (portal-edge/portal-app).
 
 ### Осознанные ограничения (что пока НЕ умеет)
 

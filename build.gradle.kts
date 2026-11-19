@@ -37,6 +37,11 @@ subprojects {
     }
 
     configurations.configureEach {
+        // jakarta-реализация JAXB 4.x (com.sun.xml.bind) тянется jaxws-ri и в fat-jar
+        // конфликтует с javax-реализацией (org.glassfish.jaxb 2.3.1): одинаковые пакеты
+        // com.sun.xml.bind.*, и ContextFinder javax-API находит чужую фабрику.
+        // В стеке javax она не нужна.
+        exclude(group = "com.sun.xml.bind")
         resolutionStrategy.eachDependency {
             if (requested.group == "org.glassfish.jaxb" && requested.name == "jaxb-runtime") {
                 useVersion(javaxJaxbVersion)

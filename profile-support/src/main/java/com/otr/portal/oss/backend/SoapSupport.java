@@ -33,8 +33,15 @@ public final class SoapSupport {
     private static final JAXBContext JAXB;
 
     static {
+        // Не используем JAXBContext.newInstance(String): javax-овый ContextFinder ищет фабрику
+        // через Thread Context ClassLoader, который на реактивных потоках может не видеть
+        // BOOT-INF/lib fat-jar (и не находит реализацию). Фабрика glassfish 2.3.1 вызывается
+        // напрямую — класс однозначно из нашего classpath (jakarta-реализация исключена в build).
         try {
-            JAXB = JAXBContext.newInstance("ru.otr.hr.ws.organization.v3");
+            JAXB = new com.sun.xml.bind.v2.ContextFactory().createContext(
+                    "ru.otr.hr.ws.organization.v3",
+                    SoapSupport.class.getClassLoader(),
+                    java.util.Collections.emptyMap());
         } catch (JAXBException e) {
             throw new IllegalStateException("Не удалось инициализировать JAXBContext контракта ОШС", e);
         }

@@ -19,10 +19,12 @@ dependencies {
     api("org.springframework:spring-web")
     api("io.projectreactor:reactor-core")
 
-    // javax JAXB 2.x — классы fk-services-sobi аннотированы javax.xml.bind
+    // javax JAXB 2.x — классы fk-services-sobi аннотированы javax.xml.bind.
+    // Реализация нужна и на этапе компиляции: SoapSupport вызывает фабрику ContextFactory
+    // напрямую (обход TCCL-зависимого lookup ContextFinder в fat-jar).
     val javaxJaxbVersion: String by rootProject.extra
     api("javax.xml.bind:jaxb-api:$javaxJaxbVersion")
-    runtimeOnly("org.glassfish.jaxb:jaxb-runtime:$javaxJaxbVersion")
+    implementation("org.glassfish.jaxb:jaxb-runtime:$javaxJaxbVersion")
     runtimeOnly("javax.activation:javax.activation-api:1.2.0")
 
     implementation(project(":command-support"))

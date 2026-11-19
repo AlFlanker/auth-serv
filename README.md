@@ -60,7 +60,9 @@ docker compose up -d --no-deps identity-service
 
 - Профиль `docker`: etcd `http://etcd-client:2379` (host-gateway), БД `jdbc:postgresql://host.docker.internal:5432/identity`
   (роль/БД создаются при первичной инициализации postgres — `environment/docker/pg/init/02_identity-service.sql`),
-  ключ подписи ephemeral, трассы — все в Jaeger (`management.tracing.sampling.probability=1.0`).
+  постоянный ключ подписи JWT с хоста (`C:\Users\AlexFlanker\AppData\Local\identity-service\keys`,
+  по умолчанию `identity-dev-01.pem`, kid `identity-dev-01`), локальный вход `user/123` включён,
+  трассы — все в Jaeger (`management.tracing.sampling.probability=1.0`).
 - `IDENTITY_INTERNAL_API_KEY` в compose должен совпадать с `IDENTITY_INTERNAL_API_KEY` монолита
   (`admin.identity-service.api-key`).
 - Jaeger UI: `http://localhost:16686`, OTLP gRPC — порт 4317.
