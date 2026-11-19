@@ -32,6 +32,7 @@ dependencies {
     implementation(project(":soap-wsdl-resolver"))
     implementation(project(":config-source"))
     implementation(project(":etcd-client"))
+    implementation(project(":webclient-support"))
 
     implementation("org.springframework.boot:spring-boot-starter")
     implementation("org.springframework.boot:spring-boot-starter-webflux")

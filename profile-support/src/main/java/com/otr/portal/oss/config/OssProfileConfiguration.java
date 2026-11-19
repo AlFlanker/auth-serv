@@ -1,36 +1,40 @@
 package com.otr.portal.oss.config;
 
 import com.otr.portal.soap.wsdl.SoapWebServiceEndpointResolver;
-import io.netty.channel.ChannelOption;
+import com.otr.portal.webclient.support.factory.WebClientFactory;
+import com.otr.portal.webclient.support.factory.WebClientFactoryContext;
+import com.otr.portal.webclient.support.model.WebClientType;
+import com.otr.portal.webclient.support.registry.WebClientConfigurationRegistry;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.web.reactive.function.client.WebClient;
-import reactor.netty.http.client.HttpClient;
-import reactor.netty.resources.ConnectionProvider;
-
-import java.time.Duration;
 
 /**
- * Конфигурация инфраструктуры профиля: WebClient для ОШС/ЮСБ, резолвер WSDL, свойства USS.
+ * Конфигурация инфраструктуры профиля: WebClient для ОШС/ЮСБ (стандартная
+ * фабрика webclient-support, тип {@link WebClientType#OSS}), резолвер WSDL,
+ * свойства USS.
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(UsbProperties.class)
 public class OssProfileConfiguration {
 
+    private static final String POOL_PREFIX = "oss-profile";
+
     @Bean
     @Qualifier("ossWebClient")
-    WebClient ossWebClient(WebClient.Builder builder) {
-        var httpClient = HttpClient.create(ConnectionProvider.builder("oss-profile")
-                        .maxConnections(200)
-                        .build())
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 10_000)
-                .responseTimeout(Duration.ofSeconds(60));
-        return builder
-                .clientConnector(new ReactorClientHttpConnector(httpClient))
-                .build();
+    WebClient ossWebClient(WebClientFactory webClientFactory,
+                           WebClientConfigurationRegistry webClientConfigurationRegistry) {
+        return webClientFactory.buildWebClient(WebClientFactoryContext.builder()
+                .poolPrefix(POOL_PREFIX)
+                .configuration(webClientConfigurationRegistry.provide(WebClientType.OSS, null))
+                .build());
+    }
+
+    @Bean
+    OssWebClientConfigurationProvider ossWebClientConfigurationProvider() {
+        return new OssWebClientConfigurationProvider();
     }
 
     @Bean
