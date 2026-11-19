@@ -125,8 +125,8 @@
 
 1. **Продление токена**: короткий access + token-exchange в identity-service. Ограничение на legacy снято (в проде JWT не использовался), но обязательны: абсолютный срок жизни, перечитывание профиля при exchange, реестр отозванных токенов.
 2. **Активная организация** — решено (19.11.2026): claim в JWT (`org_guid`/`org_code`) вместо состояния в Redis. Выбор выдаётся при входе (cookie `ACTIVE_ORG` → автовыбор единственной), сохраняется при обмене (org из prior JWT с валидацией по списку организаций) и меняется **перевыпуском токена** (PUT active возвращает новый `TokenView`; portal-edge подменяет хранимый JWT — контракт в «Возможностях сервиса», п. 2б). Cookie `ACTIVE_ORG` остаётся переходным (для монолита до катофа), в целевом контуре не нужен.
-3. **Единый формат claims** — фактически снят: оба legacy-формата (`sub`+`auth` и nav-composer `username`+`roles`+`requestScheme`) не прод; JWT nav-composer — отладочный. Проектируется один формат с нуля: `username`, `org_guid`/`org_code`, источник аутентификации — **без `roles`** (реализовано 19.11.2026: роли — отдельным запросом к Auth-сервису — `/api/internal/v1/users/groups` без кэша или в теле `/profile`); `requestScheme` — из `X-Forwarded-Proto` (не из Referer).
-4. **Переключение на JWT в проде**: катоф по переключателю portal-edge (`auth-mode: passthrough → jwt`) с планом отката (см. ADR-02). До катофа SSO-заголовок пробрасывается как есть; после — вычищается на edge и подставляется проверенный.
+3. **Единый формат claims** — фактически снят: оба legacy-формата (`sub`+`auth` и nav-composer `username`+`roles`+`requestScheme`) не прод. Проектируется один формат с нуля: `username`, `org_guid`/`org_code`, источник аутентификации — **без `roles`** (реализовано 19.11.2026: роли — отдельным запросом к Auth-сервису — `/api/internal/v1/users/groups` без кэша или в теле `/profile`); `requestScheme` — из `X-Forwarded-Proto` (не из Referer, реализовано в nav-composer).
+4. **Переключение на JWT в проде**: катоф по переключателю portal-edge (`auth-mode: passthrough → jwt`) с планом отката (см. ADR-02). До катофа SSO-заголовок пробрасывается как есть; после — вычищается на edge и подставляется проверенный. До катофа роль edge для навигации выполняет fk-portal: выпускает токен у identity-service (`/api/v1/token` по SSO-заголовку) и передаёт его в nav-composer; после катофа edge передаёт свой access-токен в nav-composer напрямую (см. п. 2в).
 
 ## Статус реализации (18.11.2026)
 
@@ -174,7 +174,7 @@
 - Инвалидация кэша (`/api/v1/userinfo/cache/invalidate`) во внешнем режиме вызывает `/api/internal/v1/users/cache/invalidate`.
 - Откат — выключить переключатель (без правок БД/etcd); `OssConfigChangedEvent` пересоздаёт WebClient клиента без рестарта.
 
-**Локальный запуск (docker compose).** Сервис добавлен в compose-стенд портала (`solutions/fk-portal/docker-compose.yml`: сервисы `identity-service` и `jaeger`); профиль `docker` (`application-docker.yml`) подключается к уже работающим на хосте etcd/PostgreSQL через host-gateway, постоянный ключ подписи JWT монтируется с хоста (`C:\Users\AlexFlanker\AppData\Local\identity-service\keys`, по умолчанию `identity-dev-01.pem`, kid `identity-dev-01`), локальный вход `user/123` включён, трассы — все в Jaeger (UI `http://localhost:16686`). Запуск: `docker compose build identity-service` → `docker compose up -d jaeger` → `docker compose up -d --no-deps identity-service`.
+**Локальный запуск (docker compose).** Сервис добавлен в compose-стенд портала (`solutions/fk-portal/docker-compose.yml`: сервисы `identity-service`, `nav-composer` и `jaeger`); профиль `docker` (`application-docker.yml`) подключается к уже работающим на хосте etcd/PostgreSQL через host-gateway, постоянный ключ подписи JWT монтируется с хоста (`C:\Users\AlexFlanker\AppData\Local\identity-service\keys`, по умолчанию `identity-dev-01.pem`, kid `identity-dev-01`), локальный вход `user/123` включён, трассы — все в Jaeger (UI `http://localhost:16686`). Запуск: `docker compose build identity-service nav-composer` → `docker compose up -d jaeger` → `docker compose up -d --no-deps identity-service nav-composer`.
 
 ### 2б. Публичные профильные эндпоинты (JWT)
 
@@ -196,6 +196,13 @@
 - **Контракт для portal-edge (катоф)**: identity-service возвращает новый токен в теле ответа PUT `/user/current/profile/organizations/active`; portal-edge обязан заменить хранимый у него JWT на полученный (response-transformer на edge) — иначе новый выбор не дойдёт до claims последующих запросов. Альтернатива для edge, хранящего токен в cookie: `Set-Cookie` с новым токеном. Cookie `ACTIVE_ORG` в целевом контуре не нужен (организация — в claims), до катофа его читает монолит.
 - Локальные пользователи (auth_source=password): профильные эндпоинты — 404 `NOT_FOUND` (в монолите 200 с `null`/405); `/currentuser` работает, `/admin/currentuser` — по роли.
 - Сбои источника — 503/504 `{code,message}`, как во внутреннем API.
+
+### 2в. Интеграция с nav-composer (JWT identity-service, реализовано 19.11.2026)
+
+- Временная HMAC-логика удалена: fk-portal больше не минтит JWT для nav-composer (`NavComposerJwtFactory`/`key.bin`).
+- **fk-portal как edge**: `NavComposerAuthTokenProvider` запрашивает access-токен у identity-service штатной первичной выдачей `POST /api/v1/token` (доверенный SSO-заголовок из текущего запроса) и кэширует его на пользователя (TTL ≤ 5 мин); заголовок `X-Auth: Bearer <токен>` уходит в nav-composer вместе с `X-Forwarded-Proto`.
+- **nav-composer**: валидирует токен по JWKS identity-service (`/.well-known/jwks.json`, проверка `iss` и срока), `username` — из `sub`; роли для фильтрации узлов — отдельным запросом `/api/internal/v1/users/groups` (`X-Internal-Key`) с Caffeine-кэшем потребителя; при недоступности сервиса роли деградируют до пустых (узлы с ограничениями скрываются, навигация живёт); `requestScheme` — из заголовка `X-Forwarded-Proto` входящего запроса.
+- После катофа portal-edge передаёт свой access-токен в nav-composer напрямую — провайдер токена в портале отмирает.
 
 ### 3. Локальные админы и роли (PostgreSQL)
 
@@ -222,7 +229,8 @@ JWKS с ротацией, выпуск/обмен/отзыв JWT
 (реестр в БД), сбор профиля/ролей из ОШС/ЮСБ с кэшем и `cacheHit`, внутренний API за `X-Internal-Key`,
 интеграция с монолитом за feature-toggle, публичные профильные эндпоинты (`/user/current/profile*`,
 `/currentuser`, `/admin/currentuser`), активная организация в claims JWT с перевыпуском при смене выбора,
-локальные пользователи/роли (чтение), конфиги из etcd.
+локальные пользователи/роли (чтение), конфиги из etcd, интеграция с nav-composer (JWT identity-service по JWKS,
+роли из `/groups` — см. п. 2в).
 
 До полного катофа (шаги 4–5 миграции, ADR-02) не хватает:
 
@@ -234,7 +242,6 @@ JWKS с ротацией, выпуск/обмен/отзыв JWT
 | 4 | SSO-logout контур: `PoibLogoutUrlResolver`, `SsoLogoutUrlResolver` (`/prepare-logout`, `/end-logout`), `UfosLogoutHandler` (logout УФОС, из `ufos-support`) | внешние `/login`, `/logout`, `/prepare-logout`, `/end-logout` остаются без изменений; сейчас есть только отзыв JWT — без резолверов завершение SSO-сессии ломается |
 | 5 | Харденинг: mTLS внутреннего API и rate-limiting на `/api/v1/token` | прод-эксплуатация: потребителей внутреннего API становится несколько (edge, portal-app, nav-composer) — общий ключ слабая защита; `/api/v1/token` — точка перебора |
 | 6 | Распределённый кэш профилей (Redis/gRPC, ADR-01) поверх локального Caffeine | несколько реплик: общий кэш снимает рассинхрон профилей/ролей между репликами и лишнюю нагрузку на ОШС/ЮСБ; сейчас сквозная инвалидация — ручная (`cache/invalidate`) |
-| 7 | Переработка JWT у nav-composer (вне identity-service, но блокирует единый формат) | nav-composer пока принимает отладочный HMAC-формат (`NavComposerJwtFactory`: `username`, `roles`, `requestScheme`); целевой — верификация по JWKS identity-service или приём проверенного JWT от edge, иначе единый формат claims не доходит до проверок доступа |
 
 Не входят в identity-service и уходят в другие контуры (по ADR-02): локальные URL-правила `CheckRoutesFilter`
 (portal-edge), проверки доступности ресурсов СПИ/ЮСБ (nav-composer), sticky-сессии и отдача UI (portal-edge/portal-app).
@@ -243,5 +250,6 @@ JWKS с ротацией, выпуск/обмен/отзыв JWT
 
 - нет rate-limiting на `/api/v1/token`; внутренний API защищён общим ключом (мTLS позже);
 - выбор активной организации живёт в claims JWT (смена выбора — перевыпуск токена, см. «Возможности сервиса», п. 2б); постоянного серверного хранения нет — при новой сессии/истечении цепочки токенов выбор теряется, как в монолите сегодня;
+- до катофа роль edge для навигации выполняет fk-portal (выпуск токена у identity-service по SSO-заголовку, кэш на пользователя); после катофа edge передаёт свой access-токен в nav-composer напрямую — провайдер в портале отмирает;
 - интеграция с монолитом через feature-toggle реализована, но на стендах переключатель ещё не включён;
 - не прогнан против реальных ОШС/ЮСБ в dev-контуре (тесты — WireMock/моки); Docker-образ собран и проверен локально в docker compose, на стендах не развёрнут.
