@@ -17,10 +17,12 @@ import reactor.core.scheduler.Schedulers;
 import java.util.Optional;
 
 /**
- * Перевыпуск JWT: перечитывание прав с сохранением времени входа и атомарная
- * замена записи в реестре (старый jti гасится). Используется обменом
- * ({@link TokenController#exchange}) и сменой активной организации
- * ({@code ProfileViewController.setActiveOrganization}).
+ * Перевыпуск JWT: перечитывание профиля (актуальность учётки и организаций)
+ * с сохранением времени входа и атомарная замена записи в реестре (старый jti
+ * гасится). Роли в claims не входят и при обмене не перечитываются — они отдаются
+ * внутренним API ({@code /api/internal/v1/users/groups}, {@code /profile}).
+ * Используется обменом ({@link TokenController#exchange}) и сменой активной
+ * организации ({@code ProfileViewController.setActiveOrganization}).
  */
 @Service
 @RequiredArgsConstructor
@@ -34,8 +36,9 @@ public class TokenRefreshService {
     private final ActiveOrganizationClaimsResolver activeOrganizationClaimsResolver;
 
     /**
-     * Полный обмен: роли перечитываются из источника, организация — из prior JWT
-     * (с валидацией по списку организаций) или автовыбором единственной.
+     * Полный обмен: профиль перечитывается из источника (актуальность учётки),
+     * организация — из prior JWT (с валидацией по списку организаций) или
+     * автовыбором единственной. Роли в токен не попадают.
      */
     public Mono<TokenService.IssuedToken> refresh(Jwt prior) {
         return refreshClaims(prior).flatMap(claims -> reissue(claims, prior));
@@ -70,7 +73,7 @@ public class TokenRefreshService {
             }
             return Mono.fromCallable(() -> localUserService.authorities(username))
                     .subscribeOn(Schedulers.boundedElastic())
-                    .map(roles -> new TokenClaims(username, roles, null, null, source));
+                    .map(ignored -> new TokenClaims(username, null, null, source));
         }
         return profileService.loadWithoutCache(username)
                 .filter(profile -> username.equals(profile.login()))
@@ -81,9 +84,9 @@ public class TokenRefreshService {
     private TokenClaims toClaims(Profile profile, String source, Jwt prior, ServerWebExchange exchange) {
         Optional<Organization> active = activeOrganizationClaimsResolver.resolve(profile, prior, exchange);
         return active
-                .map(organization -> new TokenClaims(profile.login(), profile.roles(),
+                .map(organization -> new TokenClaims(profile.login(),
                         organization.orgGUID(), organization.orgSvrCode(), source))
-                .orElseGet(() -> new TokenClaims(profile.login(), profile.roles(), null, null, source));
+                .orElseGet(() -> new TokenClaims(profile.login(), null, null, source));
     }
 
     /** Wire-форма ответа выпуска/обмена/перевыпуска (как {@code /api/v1/token}). */

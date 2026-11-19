@@ -107,7 +107,7 @@ public class ProfileViewController {
 
     /**
      * Смена активной организации — редкий сценарий: токен перевыпускается с новыми
-     * claims {@code org_guid}/{@code org_code} (роли — из профиля, время входа
+     * claims {@code org_guid}/{@code org_code} (ролей в claims нет, время входа
      * сохраняется). Старый jti гасится в реестре. Cookie {@code ACTIVE_ORG} —
      * переходная обратная совместимость с монолитом; portal-edge по ответу заменяет
      * хранимый JWT (контракт катофа, см. документацию).
@@ -120,7 +120,7 @@ public class ProfileViewController {
         if (prior == null) {
             return Mono.error(new UnauthorizedException());
         }
-        var claims = new TokenClaims(user.login(), profile.roles(),
+        var claims = new TokenClaims(user.login(),
                 selected.orgGUID(), selected.orgSvrCode(), user.authSource());
         return tokenRefreshService.reissue(claims, prior)
                 .switchIfEmpty(Mono.error(new UnauthorizedException()))

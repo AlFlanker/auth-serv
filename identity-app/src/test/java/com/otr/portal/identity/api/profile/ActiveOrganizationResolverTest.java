@@ -35,7 +35,7 @@ class ActiveOrganizationResolverTest {
 
     @Test
     void claimOrgCode_winsOverCookie() {
-        var user = new AuthenticatedUser("ivanov", List.of(), "ORG1", "GUID-ORG1", "X-Auth");
+        var user = new AuthenticatedUser("ivanov", "ORG1", "GUID-ORG1", "X-Auth");
         var exchange = exchangeWithCookie("ORG2");
 
         StepVerifier.create(resolver.resolve(profile("ORG1", "ORG2"), user, exchange))
@@ -45,7 +45,7 @@ class ActiveOrganizationResolverTest {
 
     @Test
     void cookie_selectsOrganization_whenClaimAbsent() {
-        var user = new AuthenticatedUser("ivanov", List.of(), null, null, "X-Auth");
+        var user = new AuthenticatedUser("ivanov", null, null, "X-Auth");
         var exchange = exchangeWithCookie("ORG2");
 
         StepVerifier.create(resolver.resolve(profile("ORG1", "ORG2"), user, exchange))
@@ -55,7 +55,7 @@ class ActiveOrganizationResolverTest {
 
     @Test
     void cookieValue_isUrlDecoded() {
-        var user = new AuthenticatedUser("ivanov", List.of(), null, null, "X-Auth");
+        var user = new AuthenticatedUser("ivanov", null, null, "X-Auth");
         var exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/user/current/profile")
                 .cookie(new HttpCookie(ActiveOrganizationResolver.ACTIVE_ORG_COOKIE,
                         URLEncoder.encode("ORG 2", StandardCharsets.UTF_8)))
@@ -68,7 +68,7 @@ class ActiveOrganizationResolverTest {
 
     @Test
     void staleClaimOrCookie_fallsThroughToSingleOrganization() {
-        var user = new AuthenticatedUser("ivanov", List.of(), "STALE", null, "X-Auth");
+        var user = new AuthenticatedUser("ivanov", "STALE", null, "X-Auth");
         var exchange = exchangeWithCookie("STALE-TOO");
 
         StepVerifier.create(resolver.resolve(profile("ORG1"), user, exchange))
@@ -78,7 +78,7 @@ class ActiveOrganizationResolverTest {
 
     @Test
     void multiOrgWithoutAnySource_throwsOrgNotSelected() {
-        var user = new AuthenticatedUser("ivanov", List.of(), null, null, "X-Auth");
+        var user = new AuthenticatedUser("ivanov", null, null, "X-Auth");
         var exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/user/current/profile").build());
 
         StepVerifier.create(resolver.resolve(profile("ORG1", "ORG2"), user, exchange))

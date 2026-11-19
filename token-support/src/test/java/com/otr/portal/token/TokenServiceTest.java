@@ -33,7 +33,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class TokenServiceTest {
     private final TokenProperties properties = new TokenProperties(Duration.ofMinutes(30),
             "https://identity-service.test", "test-kid", List.of("edge"), Duration.ofSeconds(5), Duration.ofHours(2));
-    private final TokenClaims user = new TokenClaims("ivanov", List.of("ROLE_USER"), "GUID-1", "ORG-1", "X-Auth");
+    private final TokenClaims user = new TokenClaims("ivanov", "GUID-1", "ORG-1", "X-Auth");
     private JwtKeyProvider keys;
     private TokenService service;
     private JwtDecoder decoder;
@@ -53,7 +53,7 @@ class TokenServiceTest {
 
         assertThat(jwt.getSubject()).isEqualTo(user.username());
         assertThat(jwt.getClaimAsString("username")).isEqualTo(user.username());
-        assertThat(jwt.getClaimAsStringList("roles")).containsExactly("ROLE_USER");
+        assertThat(jwt.getClaims()).doesNotContainKey("roles");
         assertThat(jwt.getClaimAsString("org_guid")).isEqualTo("GUID-1");
         assertThat(jwt.getClaimAsString("org_code")).isEqualTo("ORG-1");
         assertThat(jwt.getClaimAsString("auth_source")).isEqualTo("X-Auth");
@@ -68,7 +68,7 @@ class TokenServiceTest {
     @Test
     void mintWithoutOrganization() {
         var jwt = decoder.decode(service.mint(new TokenClaims(
-                "admin", List.of("ROLE_ADMIN"), null, null, "password")).block());
+                "admin", null, null, "password")).block());
         assertThat(jwt.getClaims()).doesNotContainKeys("org_guid", "org_code");
         assertThat(jwt.getClaimAsString("auth_source")).isEqualTo("password");
     }
@@ -123,7 +123,6 @@ class TokenServiceTest {
         rejectClaims(b -> b.claim("username", "other-user"));
         rejectClaims(b -> b.claim("auth_source", null));
         rejectClaims(b -> b.claim("auth_time", null));
-        rejectClaims(b -> b.claim("roles", "ROLE_ADMIN"));
         rejectClaims(b -> b.expirationTime(null));
         rejectClaims(b -> b.issueTime(null));
     }
@@ -191,6 +190,6 @@ class TokenServiceTest {
         return new JWTClaimsSet.Builder().issuer(properties.issuer()).audience(properties.audiences())
                 .subject(user.username()).jwtID("previous-id").issueTime(Date.from(now))
                 .expirationTime(Date.from(now.plusSeconds(60))).claim("username", user.username())
-                .claim("roles", user.roles()).claim("auth_source", user.authSource()).claim("auth_time", now.getEpochSecond());
+                .claim("auth_source", user.authSource()).claim("auth_time", now.getEpochSecond());
     }
 }

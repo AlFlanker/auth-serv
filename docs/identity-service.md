@@ -123,9 +123,9 @@
 
 ## Открытые решения (требуют согласования)
 
-1. **Продление токена**: короткий access + token-exchange в identity-service. Ограничение на legacy снято (в проде JWT не использовался), но обязательны: абсолютный срок жизни, перечитывание ролей при exchange, реестр отозванных токенов.
+1. **Продление токена**: короткий access + token-exchange в identity-service. Ограничение на legacy снято (в проде JWT не использовался), но обязательны: абсолютный срок жизни, перечитывание профиля при exchange, реестр отозванных токенов.
 2. **Активная организация** — решено (19.11.2026): claim в JWT (`org_guid`/`org_code`) вместо состояния в Redis. Выбор выдаётся при входе (cookie `ACTIVE_ORG` → автовыбор единственной), сохраняется при обмене (org из prior JWT с валидацией по списку организаций) и меняется **перевыпуском токена** (PUT active возвращает новый `TokenView`; portal-edge подменяет хранимый JWT — контракт в «Возможностях сервиса», п. 2б). Cookie `ACTIVE_ORG` остаётся переходным (для монолита до катофа), в целевом контуре не нужен.
-3. **Единый формат claims** — фактически снят: оба legacy-формата (`sub`+`auth` и nav-composer `username`+`roles`+`requestScheme`) не прод; JWT nav-composer — отладочный. Проектируется один формат с нуля: `username`, `org_guid`/`org_code`, источник аутентификации — **без `roles`** (роли — отдельным запросом к Auth-сервису, см. п. 8 таблицы недостающих функций); `requestScheme` — из `X-Forwarded-Proto` (не из Referer).
+3. **Единый формат claims** — фактически снят: оба legacy-формата (`sub`+`auth` и nav-composer `username`+`roles`+`requestScheme`) не прод; JWT nav-composer — отладочный. Проектируется один формат с нуля: `username`, `org_guid`/`org_code`, источник аутентификации — **без `roles`** (реализовано 19.11.2026: роли — отдельным запросом к Auth-сервису — `/api/internal/v1/users/groups` без кэша или в теле `/profile`); `requestScheme` — из `X-Forwarded-Proto` (не из Referer).
 4. **Переключение на JWT в проде**: катоф по переключателю portal-edge (`auth-mode: passthrough → jwt`) с планом отката (см. ADR-02). До катофа SSO-заголовок пробрасывается как есть; после — вычищается на edge и подставляется проверенный.
 
 ## Статус реализации (18.11.2026)
@@ -141,7 +141,7 @@
 - M1: конфиги из etcd — `OSSConfig`/`UsbConfig` (subset полей), watch + события изменения, сброс кэшей;
 - M2: ядро профиля — `OssConnection` (SOAP СОБИ через soap-client + WSDL-resolver, REST USS v1/v2, перепаковка в формат ОШС), команды с Resilience4j, `ProfileService` (реактивный, Caffeine-кэш, автовыбор единственной организации, признак `cacheHit`), внутренний API `/api/internal/v1/users/...` с телом запроса (защита `X-Internal-Key`);
 - M3: локальные админы (`user/123`, `user2/1234`, BCrypt) и роли (PostgreSQL, H2 в тестах), `GET /roles`, `/roles/{id}`;
-- M4: JWT — RS256, ключ при старте (kid `identity-1`), `/api/v1/token` (SSO-заголовок с cookie-fallback и `^M`, либо локальный логин/пароль), `/api/internal/token/exchange` (перечитывание ролей, проверка отзыва), `/api/v1/logout` (реестр jti в БД), `/.well-known/jwks.json`; claims: `sub`, `username`, `roles[]`, `org_guid`, `org_code`, `auth_source`.
+- M4: JWT — RS256, ключ при старте (kid `identity-1`), `/api/v1/token` (SSO-заголовок с cookie-fallback и `^M`, либо локальный логин/пароль), `/api/internal/token/exchange` (перечитывание профиля, проверка отзыва), `/api/v1/logout` (реестр jti в БД), `/.well-known/jwks.json`; claims: `sub`, `username`, `org_guid`, `org_code`, `auth_source` (без `roles` — см. п. 4).
 
 После M5 реализованы постоянные ключи, ротация и ограничения жизненного цикла JWT. Остались мTLS для внутреннего API, rate-limiting на `/api/v1/token`, прогон в dev-контуре против реальных ОШС/ЮСБ и включение переключателя в fk-portal на стендах.
 
@@ -169,6 +169,7 @@
 - Переключатель: `OSSConfig.redirectToExternalService` (конфиг-БД/UI, по умолчанию выключен) + `OSSConfig.externalIdentityServiceUrl` — базовый URL внутреннего API. Значения попадают в etcd (`fk-portal/OSSConfig`) и игнорируются сервисом (subset-DTO).
 - Секрет `admin.identity-service.api-key` (application.yml/secret-manager, совпадает с `identity.internal.api-key`) — в конфиг-БД не хранится.
 - В монолите `OSSUserDetailsService` при включённом переключателе направляет загрузку профиля/ролей/кастомных полей в `IdentityServiceClient` (WebClient, пул `IDENTITY_SERVICE`, `X-Internal-Key`); **локальный кэш монолита в этом режиме не наполняется** — кэширует только identity-service.
+- Загрузка групп во внешнем режиме сохраняет семантику монолита: zip(профиль, authorities) выполняется внутри identity-service (`ProfileService.loadFromOss`) с теми же флагами `ossGroupEnabled`/`usbGroupEnabled` из etcd; пустые группы → `ROLE_UNDEFINED`. Роли приходят в теле `/profile` (из кэша сервиса — без дополнительного SOAP-вызова на каждый запрос); `/groups` без кэша — для потребителей «только роли».
 - Событие `UserLoadedEvent` (потребитель — `UserLastLoginDateService`) публикуется только при `cacheHit=false`, т.е. на реальных загрузках из источника — как сегодня при промахах локального кэша.
 - Инвалидация кэша (`/api/v1/userinfo/cache/invalidate`) во внешнем режиме вызывает `/api/internal/v1/users/cache/invalidate`.
 - Откат — выключить переключатель (без правок БД/etcd); `OssConfigChangedEvent` пересоздаёт WebClient клиента без рестарта.
@@ -187,9 +188,9 @@
 | `GET /user/current/profile/organizations` | список организаций `{organizationCode, organizationName, active}`; `active` — статус реорганизации `ACTIVE` (как в монолите) |
 | `GET/PUT /user/current/profile/organizations/active` | активная организация. PUT валидирует по списку организаций владельца и **перевыпускает токен** с новыми claims `org_guid`/`org_code` (время входа сохраняется, старый jti гасится в реестре): ответ **200 + `TokenView`** `{accessToken, tokenType, expiresInSeconds}` (`Cache-Control: no-store`) + cookie `ACTIVE_ORG` (переходный); неизвестный код — 404 `ORGANIZATION_NOT_FOUND` (в монолите — 500) |
 | `HEAD /currentuser` | заголовок `user` + no-cache заголовки |
-| `HEAD /admin/currentuser` | то же при `ROLE_ADMIN` в JWT, иначе 403 |
+| `HEAD /admin/currentuser` | то же при `ROLE_ADMIN` из источника ролей (SSO — ОШС/ЮСБ без кэша, локальные — из БД), иначе 403 |
 
-- Аутентификация: `JwtAuthenticationWebFilter` на путях `/user/current/**`, `/currentuser`, `/admin/currentuser` — автономная проверка Bearer JWT по подписи и сроку (как на portal-edge, без реестра jti); логин из `sub`, роли из `roles`.
+- Аутентификация: `JwtAuthenticationWebFilter` на путях `/user/current/**`, `/currentuser`, `/admin/currentuser` — автономная проверка Bearer JWT по подписи и сроку (как на portal-edge, без реестра jti); логин из `sub`.
 - Активная организация при чтении: claim `org_code` → cookie `ACTIVE_ORG` → единственная организация; иначе **428** `{errorCode: "ORG_NOT_SELECTED", error}` — контракт `OrganizationGuardFilter`, UI по нему открывает модалку выбора (в монолите в этом случае был 500).
 - Выбор организации живёт в claims JWT: при выпуске — cookie `ACTIVE_ORG` (если проброшена) или автовыбор единственной; при обмене — сохраняется из prior JWT (с валидацией по списку организаций); смена выбора — перевыпуск токена (PUT active). Постоянного серверного хранения нет: при новой сессии/истечении цепочки токенов выбор теряется — как в монолите сегодня.
 - **Контракт для portal-edge (катоф)**: identity-service возвращает новый токен в теле ответа PUT `/user/current/profile/organizations/active`; portal-edge обязан заменить хранимый у него JWT на полученный (response-transformer на edge) — иначе новый выбор не дойдёт до claims последующих запросов. Альтернатива для edge, хранящего токен в cookie: `Set-Cookie` с новым токеном. Cookie `ACTIVE_ORG` в целевом контуре не нужен (организация — в claims), до катофа его читает монолит.
@@ -207,8 +208,8 @@
 
 - Постоянный RSA-ключ загружается из PKCS#8 PEM. Набор открытых ключей поддерживает период перекрытия при ротации.
 - `POST /api/v1/token` выпускает access-токен по доверенному SSO-заголовку. Вход с локальным паролем и SSO-cookie включаются отдельно.
-- claims `roles` — полный список групп ОШС; у реальных пользователей их сотни, токен ~17 КБ (не проходит лимиты заголовков, 431). Состав полей JWT пересматривается: роли убираем из claims, роли — отдельным запросом к сервису (см. п. 8 таблицы недостающих функций);
-- `POST /api/internal/token/exchange` однократно обменивает действующий токен с перечитыванием прав. Цепочка обменов ограничена временем от первичной выдачи токена порталом.
+- claims не содержат `roles` — компактный токен (у реальных пользователей сотни групп ОШС; с полным списком ролей токен был ~17 КБ и не проходил дефолтные лимиты заголовков Netty/nginx 8 КБ — HTTP 431). Роли потребители получают отдельным запросом к сервису: `/api/internal/v1/users/groups` (без кэша) или в теле `/api/internal/v1/users/profile`;
+- `POST /api/internal/token/exchange` однократно обменивает действующий токен с перечитыванием профиля (актуальность учётки и организаций). Цепочка обменов ограничена временем от первичной выдачи токена порталом.
 - `POST /api/v1/logout` отзывает предъявленный токен для дальнейшего обмена. При автономной проверке в portal-edge действует TTL токена.
 - `GET /.well-known/jwks.json` публикует активный и дополнительные открытые ключи с настраиваемым сроком кэширования.
 
@@ -216,7 +217,8 @@
 
 ## Недостающие функции: кому и зачем (статус 19.11.2026)
 
-Ядро для целевого контура готово: единый формат claims, JWKS с ротацией, выпуск/обмен/отзыв JWT
+Ядро для целевого контура готово: единый формат claims (без ролей — компактный токен; роли отдельным запросом к сервису),
+JWKS с ротацией, выпуск/обмен/отзыв JWT
 (реестр в БД), сбор профиля/ролей из ОШС/ЮСБ с кэшем и `cacheHit`, внутренний API за `X-Internal-Key`,
 интеграция с монолитом за feature-toggle, публичные профильные эндпоинты (`/user/current/profile*`,
 `/currentuser`, `/admin/currentuser`), активная организация в claims JWT с перевыпуском при смене выбора,
@@ -233,7 +235,6 @@
 | 5 | Харденинг: mTLS внутреннего API и rate-limiting на `/api/v1/token` | прод-эксплуатация: потребителей внутреннего API становится несколько (edge, portal-app, nav-composer) — общий ключ слабая защита; `/api/v1/token` — точка перебора |
 | 6 | Распределённый кэш профилей (Redis/gRPC, ADR-01) поверх локального Caffeine | несколько реплик: общий кэш снимает рассинхрон профилей/ролей между репликами и лишнюю нагрузку на ОШС/ЮСБ; сейчас сквозная инвалидация — ручная (`cache/invalidate`) |
 | 7 | Переработка JWT у nav-composer (вне identity-service, но блокирует единый формат) | nav-composer пока принимает отладочный HMAC-формат (`NavComposerJwtFactory`: `username`, `roles`, `requestScheme`); целевой — верификация по JWKS identity-service или приём проверенного JWT от edge, иначе единый формат claims не доходит до проверок доступа |
-| 8 | Пересмотр состава полей JWT: **роли убираем из claims** (у реальных пользователей сотни групп ОШС — токен ~17 КБ, не проходит дефолтные лимиты заголовков Netty/nginx 8 КБ, HTTP 431). Роли — отдельным запросом к Auth-сервису (внутренний API `/api/internal/v1/users/groups` уже отдаёт роли без кэша) | portal-edge и все сервисы, принимающие Bearer: компактный токен вместо поднятия лимитов заголовков, роли запрашиваются отдельно (с кэшем на стороне потребителя); внутри identity-service проверки ролей (`/admin/currentuser`, `JwtAuthenticationWebFilter`) переходят на внутренний источник ролей (`ProfileService.getUserAuthorities`). Поднятые на локальном стенде лимиты заголовков (docker compose) — временная мера |
 
 Не входят в identity-service и уходят в другие контуры (по ADR-02): локальные URL-правила `CheckRoutesFilter`
 (portal-edge), проверки доступности ресурсов СПИ/ЮСБ (nav-composer), sticky-сессии и отдача UI (portal-edge/portal-app).

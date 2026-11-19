@@ -74,7 +74,7 @@ public class TokenController {
         return Mono.fromCallable(() -> localUserService.verify(body.username(), body.password()))
                 .subscribeOn(Schedulers.boundedElastic())
                 .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED)))
-                .map(roles -> new TokenClaims(body.username(), roles, null, null, AUTH_SOURCE_PASSWORD));
+                .map(ignored -> new TokenClaims(body.username(), null, null, AUTH_SOURCE_PASSWORD));
     }
 
     private Mono<Jwt> authenticatedBearer(ServerWebExchange exchange) {

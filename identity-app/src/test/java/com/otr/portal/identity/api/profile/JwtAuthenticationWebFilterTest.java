@@ -18,7 +18,6 @@ import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -70,8 +69,7 @@ class JwtAuthenticationWebFilterTest {
 
     @Test
     void requestWithValidToken_storesAuthenticatedUserFromClaims() {
-        String token = tokenService.mint(new TokenClaims("ivanov", List.of("ROLE_USER", "ROLE_EDITOR"),
-                "GUID-1", "ORG1", "X-Auth")).block();
+        String token = tokenService.mint(new TokenClaims("ivanov", "GUID-1", "ORG1", "X-Auth")).block();
         var exchange = exchange(MockServerHttpRequest.get("/user/current/profile")
                 .header(HttpHeaders.AUTHORIZATION, "Bearer " + token)
                 .build());
@@ -86,7 +84,6 @@ class JwtAuthenticationWebFilterTest {
 
         assertThat(captured.get()).isNotNull();
         assertThat(captured.get().login()).isEqualTo("ivanov");
-        assertThat(captured.get().roles()).containsExactly("ROLE_USER", "ROLE_EDITOR");
         assertThat(captured.get().orgCode()).isEqualTo("ORG1");
         assertThat(captured.get().orgGuid()).isEqualTo("GUID-1");
         assertThat(captured.get().authSource()).isEqualTo("X-Auth");

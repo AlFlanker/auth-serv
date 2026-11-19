@@ -11,7 +11,6 @@ import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.HashSet;
-import java.util.List;
 
 /** Проверяет подписанные claims до автоматического преобразования типов Spring Security. */
 final class AccessTokenValidator implements JWTClaimsSetVerifier<SecurityContext> {
@@ -30,9 +29,7 @@ final class AccessTokenValidator implements JWTClaimsSetVerifier<SecurityContext
         String subject = claims.getSubject();
         if (subject == null || subject.isBlank() || !subject.equals(claims.getClaim("username"))
                 || !(claims.getClaim("auth_source") instanceof String source) || source.isBlank()
-                || claims.getJWTID() == null || claims.getJWTID().isBlank() || claims.getJWTID().length() > 64
-                || !(claims.getClaim("roles") instanceof List<?> roles)
-                || roles.stream().anyMatch(role -> !(role instanceof String s) || s.isBlank())) {
+                || claims.getJWTID() == null || claims.getJWTID().isBlank() || claims.getJWTID().length() > 64) {
             throw new BadJWTException("Invalid access token identity claims");
         }
         if (claims.getIssueTime() == null || claims.getExpirationTime() == null) {

@@ -14,7 +14,6 @@ import reactor.core.scheduler.Schedulers;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.List;
 import java.util.UUID;
 
 @RequiredArgsConstructor
@@ -76,7 +75,6 @@ public class TokenService {
                 .audience(properties.audiences())
                 .subject(claims.username())
                 .claim("username", claims.username())
-                .claim("roles", claims.roles() == null ? List.of() : claims.roles())
                 .claim("auth_source", claims.authSource())
                 .claim("auth_time", authenticatedAt.getEpochSecond())
                 .issuedAt(issuedAt)

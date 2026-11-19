@@ -100,7 +100,7 @@ class TokenControllerTest {
         Mockito.verify(tokenRegistry).register(jwt.getId(), jwt.getExpiresAt());
         assertThat(jwt.getClaimAsString("auth_source")).isEqualTo("X-Auth");
         assertThat(jwt.getClaimAsString("org_code")).isEqualTo("ORG-1");
-        assertThat(jwt.getClaimAsStringList("roles")).containsExactly("ROLE_ADMIN");
+        assertThat(jwt.getClaims()).doesNotContainKey("roles");
     }
 
     @Test
@@ -147,7 +147,7 @@ class TokenControllerTest {
     @Test
     void exchange_reissuesTokenWithFreshRolesAndPreservedOrganization() {
         var original = tokenService.mint(new TokenClaims(
-                "ivanov", List.of("ROLE_OLD"), "GUID-1", "ORG-1", "X-Auth")).block();
+                "ivanov", "GUID-1", "ORG-1", "X-Auth")).block();
         when(tokenRegistry.isActive(any())).thenReturn(Mono.just(true));
         when(profileService.loadWithoutCache("ivanov")).thenReturn(Mono.just(profile("ORG-1", "ORG-2")));
         when(tokenRegistry.exchange(any(), any(), any())).thenReturn(Mono.just(true));
@@ -170,7 +170,7 @@ class TokenControllerTest {
     @Test
     void exchange_staleOrganizationIsDroppedFromClaims() {
         var original = tokenService.mint(new TokenClaims(
-                "ivanov", List.of("ROLE_OLD"), "GUID-STALE", "ORG-STALE", "X-Auth")).block();
+                "ivanov", "GUID-STALE", "ORG-STALE", "X-Auth")).block();
         when(tokenRegistry.isActive(any())).thenReturn(Mono.just(true));
         when(profileService.loadWithoutCache("ivanov")).thenReturn(Mono.just(profile("ORG-1", "ORG-2")));
         when(tokenRegistry.exchange(any(), any(), any())).thenReturn(Mono.just(true));
@@ -227,7 +227,7 @@ class TokenControllerTest {
 
     @Test
     void exchangeReportsDatabaseTimeoutAsServerError() {
-        var original = tokenService.mint(new TokenClaims("user", List.of(), null, null, "password")).block();
+        var original = tokenService.mint(new TokenClaims("user", null, null, "password")).block();
         when(tokenRegistry.isActive(any())).thenReturn(Mono.just(true));
         when(localUserService.authorities("user")).thenReturn(List.of("ROLE_USER"));
         when(tokenRegistry.exchange(any(), any(), any())).thenReturn(Mono.error(new QueryTimeoutException("timeout")));
@@ -240,7 +240,7 @@ class TokenControllerTest {
     @Test
     void exchange_revokedToken_returns401() {
         var original = tokenService.mint(new TokenClaims(
-                "ivanov", List.of("ROLE_OLD"), null, null, "X-Auth")).block();
+                "ivanov", null, null, "X-Auth")).block();
         when(tokenRegistry.isActive(any())).thenReturn(Mono.just(false));
 
         client.post().uri("/api/internal/token/exchange")
@@ -252,7 +252,7 @@ class TokenControllerTest {
     @Test
     void logout_revokesToken() {
         var original = tokenService.mint(new TokenClaims(
-                "ivanov", List.of(), null, null, "X-Auth")).block();
+                "ivanov", null, null, "X-Auth")).block();
         when(tokenRegistry.revoke(any())).thenReturn(Mono.empty());
 
         client.post().uri("/api/v1/logout")
@@ -287,7 +287,7 @@ class TokenControllerTest {
 
     @Test
     void exchangeLosesRaceToLogout() {
-        var original = tokenService.mint(new TokenClaims("user", List.of(), null, null, "password")).block();
+        var original = tokenService.mint(new TokenClaims("user", null, null, "password")).block();
         when(tokenRegistry.isActive(any())).thenReturn(Mono.just(true));
         when(localUserService.authorities("user")).thenReturn(List.of("ROLE_USER"));
         when(tokenRegistry.exchange(any(), any(), any())).thenReturn(Mono.just(false));
@@ -298,7 +298,7 @@ class TokenControllerTest {
 
     @Test
     void missingSsoProfilePreventsIssuanceAndExchange() {
-        var original = tokenService.mint(new TokenClaims("admin", List.of(), null, null, "X-Auth")).block();
+        var original = tokenService.mint(new TokenClaims("admin", null, null, "X-Auth")).block();
         when(tokenRegistry.isActive(any())).thenReturn(Mono.just(true));
         when(profileService.loadWithoutCache("admin")).thenReturn(Mono.error(new ProfileNotFoundException("admin")));
         client.post().uri("/api/v1/token").header("X-Auth", "admin")

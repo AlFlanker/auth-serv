@@ -65,7 +65,7 @@ class ProfileViewControllerTest {
     private WebFilter authenticatedUserFilter() {
         return (exchange, chain) -> {
             exchange.getAttributes().put(CurrentUserResolver.USER_ATTRIBUTE,
-                    new AuthenticatedUser("ivanov", List.of("ROLE_USER"), null, null, "X-Auth"));
+                    new AuthenticatedUser("ivanov", null, null, "X-Auth"));
             exchange.getAttributes().put(JwtAuthenticationWebFilter.JWT_ATTRIBUTE, priorJwt);
             return chain.filter(exchange);
         };
@@ -245,7 +245,6 @@ class ProfileViewControllerTest {
         ArgumentCaptor<TokenClaims> claims = ArgumentCaptor.forClass(TokenClaims.class);
         verify(tokenRefreshService).reissue(claims.capture(), Mockito.eq(priorJwt));
         assertThat(claims.getValue().username()).isEqualTo("ivanov");
-        assertThat(claims.getValue().roles()).containsExactly("ROLE_USER");
         assertThat(claims.getValue().orgCode()).isEqualTo("ORG2");
         assertThat(claims.getValue().orgGuid()).isEqualTo("GUID-ORG2");
         assertThat(claims.getValue().authSource()).isEqualTo("X-Auth");
