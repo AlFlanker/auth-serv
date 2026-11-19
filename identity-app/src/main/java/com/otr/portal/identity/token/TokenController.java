@@ -1,9 +1,6 @@
 package com.otr.portal.identity.token;
 
 import com.otr.portal.identity.users.LocalUserService;
-import com.otr.portal.oss.exception.ProfileNotFoundException;
-import com.otr.portal.oss.model.Profile;
-import com.otr.portal.oss.userdetails.ProfileService;
 import com.otr.portal.token.TokenClaims;
 import com.otr.portal.token.TokenService;
 import lombok.RequiredArgsConstructor;
@@ -30,18 +27,19 @@ public class TokenController {
     private static final String BEARER_PREFIX = "Bearer ";
 
     private final SsoPrincipalExtractor ssoPrincipalExtractor;
-    private final ProfileService profileService;
     private final LocalUserService localUserService;
     private final TokenService tokenService;
     private final TokenRegistry tokenRegistry;
     private final JwtDecoder jwtDecoder;
     private final AuthenticationProperties authentication;
+    private final TokenRefreshService tokenRefreshService;
 
     @PostMapping("/api/v1/token")
-    public Mono<ResponseEntity<TokenView>> token(ServerWebExchange exchange,
-                                                 @RequestBody(required = false) TokenRequest body) {
+    public Mono<ResponseEntity<TokenRefreshService.TokenView>> token(ServerWebExchange exchange,
+                                                                     @RequestBody(required = false) TokenRequest body) {
         return ssoPrincipalExtractor.extract(exchange)
-                .flatMap(principal -> loadSsoClaims(principal.login(), principal.headerName())
+                .flatMap(principal -> tokenRefreshService
+                        .loadSsoClaims(principal.login(), principal.headerName(), exchange)
                         .switchIfEmpty(Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED))))
                 .switchIfEmpty(Mono.defer(() -> authenticatePassword(body)))
                 .flatMap(tokenService::issue)
@@ -50,12 +48,10 @@ public class TokenController {
     }
 
     @PostMapping("/api/internal/token/exchange")
-    public Mono<ResponseEntity<TokenView>> exchange(ServerWebExchange exchange) {
+    public Mono<ResponseEntity<TokenRefreshService.TokenView>> exchange(ServerWebExchange exchange) {
         return authenticatedBearer(exchange)
                 .filterWhen(jwt -> tokenRegistry.isActive(jwt.getId()))
-                .flatMap(jwt -> refreshClaims(jwt)
-                        .flatMap(claims -> tokenService.reissue(claims, jwt))
-                        .filterWhen(issued -> tokenRegistry.exchange(jwt.getId(), issued.jti(), issued.expiresAt())))
+                .flatMap(tokenRefreshService::refresh)
                 .map(this::tokenResponse)
                 .onErrorResume(BadJwtException.class, ignored -> Mono.empty())
                 .switchIfEmpty(Mono.just(unauthorizedBearer()));
@@ -81,31 +77,6 @@ public class TokenController {
                 .map(roles -> new TokenClaims(body.username(), roles, null, null, AUTH_SOURCE_PASSWORD));
     }
 
-    private Mono<TokenClaims> refreshClaims(Jwt jwt) {
-        String username = jwt.getSubject();
-        String source = jwt.getClaimAsString("auth_source");
-        if (AUTH_SOURCE_PASSWORD.equals(source)) {
-            if (!authentication.localPasswordEnabled()) {
-                return Mono.empty();
-            }
-            return Mono.fromCallable(() -> localUserService.authorities(username))
-                    .subscribeOn(Schedulers.boundedElastic())
-                    .map(roles -> new TokenClaims(username, roles, null, null, source));
-        }
-        return loadSsoClaims(username, source);
-    }
-
-    private Mono<TokenClaims> loadSsoClaims(String username, String source) {
-        return profileService.loadWithoutCache(username)
-                .filter(profile -> username.equals(profile.login()))
-                .map(profile -> toClaims(profile, source))
-                .onErrorResume(ProfileNotFoundException.class, ignored -> Mono.empty());
-    }
-
-    private TokenClaims toClaims(Profile profile, String authSource) {
-        return new TokenClaims(profile.login(), profile.roles(), profile.activeOrgGuid(), profile.activeOrgCode(), authSource);
-    }
-
     private Mono<Jwt> authenticatedBearer(ServerWebExchange exchange) {
         var headers = exchange.getRequest().getHeaders().get(HttpHeaders.AUTHORIZATION);
         if (headers == null || headers.size() != 1) {
@@ -121,9 +92,9 @@ public class TokenController {
                 .onErrorResume(BadJwtException.class, ignored -> Mono.empty());
     }
 
-    private ResponseEntity<TokenView> tokenResponse(TokenService.IssuedToken token) {
+    private ResponseEntity<TokenRefreshService.TokenView> tokenResponse(TokenService.IssuedToken token) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).header(HttpHeaders.PRAGMA, "no-cache")
-                .body(new TokenView(token.value(), "Bearer", token.expiresInSeconds()));
+                .body(TokenRefreshService.toView(token));
     }
 
     private <T> ResponseEntity<T> unauthorizedBearer() {
@@ -134,13 +105,6 @@ public class TokenController {
         @Override
         public String toString() {
             return "TokenRequest[redacted]";
-        }
-    }
-
-    public record TokenView(String accessToken, String tokenType, long expiresInSeconds) {
-        @Override
-        public String toString() {
-            return "TokenView[redacted]";
         }
     }
 }

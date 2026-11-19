@@ -1,21 +1,29 @@
 package com.otr.portal.identity.api.profile;
 
 import com.otr.portal.identity.api.internal.InternalApiExceptionHandler;
+import com.otr.portal.identity.token.TokenRefreshService;
 import com.otr.portal.oss.exception.ProfileNotFoundException;
 import com.otr.portal.oss.model.Organization;
 import com.otr.portal.oss.model.Profile;
 import com.otr.portal.oss.userdetails.ProfileService;
+import com.otr.portal.token.TokenClaims;
+import com.otr.portal.token.TokenService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 import org.springframework.http.HttpHeaders;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.springframework.web.server.WebFilter;
 import reactor.core.publisher.Mono;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -23,14 +31,16 @@ import static org.springframework.http.MediaType.APPLICATION_JSON;
 
 /**
  * Тесты {@link ProfileViewController}: ветки JWT-пользователя, wire-контракт ответов,
- * cookie активной организации, ошибки 428/404/400.
+ * cookie активной организации, перевыпуск токена при смене организации, ошибки 428/404/400.
  */
 class ProfileViewControllerTest {
 
     private final ProfileService profileService = Mockito.mock(ProfileService.class);
+    private final TokenRefreshService tokenRefreshService = Mockito.mock(TokenRefreshService.class);
     private final CurrentUserResolver currentUserResolver = new CurrentUserResolver();
+    private final Jwt priorJwt = Mockito.mock(Jwt.class);
     private final ProfileViewController controller = new ProfileViewController(profileService, currentUserResolver,
-            new ActiveOrganizationResolver(), new ProfileViewMapper());
+            new ActiveOrganizationResolver(), new ProfileViewMapper(), tokenRefreshService);
 
     private WebTestClient client;
 
@@ -56,6 +66,7 @@ class ProfileViewControllerTest {
         return (exchange, chain) -> {
             exchange.getAttributes().put(CurrentUserResolver.USER_ATTRIBUTE,
                     new AuthenticatedUser("ivanov", List.of("ROLE_USER"), null, null, "X-Auth"));
+            exchange.getAttributes().put(JwtAuthenticationWebFilter.JWT_ATTRIBUTE, priorJwt);
             return chain.filter(exchange);
         };
     }
@@ -211,8 +222,10 @@ class ProfileViewControllerTest {
     }
 
     @Test
-    void putOrganizationsActive_setsActiveOrgCookie() {
+    void putOrganizationsActive_reissuesTokenAndSetsCookie() {
         when(profileService.load("ivanov")).thenReturn(Mono.just(profile("ORG1", "ORG2")));
+        when(tokenRefreshService.reissue(any(), any())).thenReturn(Mono.just(
+                new TokenService.IssuedToken("new-token", 1800, "new-jti", Instant.now().plusSeconds(1800))));
 
         client.put().uri("/user/current/profile/organizations/active")
                 .contentType(APPLICATION_JSON)
@@ -221,8 +234,35 @@ class ProfileViewControllerTest {
                         """)
                 .exchange()
                 .expectStatus().isOk()
+                .expectHeader().valueEquals(HttpHeaders.CACHE_CONTROL, "no-store")
                 .expectHeader().valueMatches(HttpHeaders.SET_COOKIE,
-                        ".*ACTIVE_ORG=ORG2; Path=/; HttpOnly; SameSite=Strict.*");
+                        ".*ACTIVE_ORG=ORG2; Path=/; HttpOnly; SameSite=Strict.*")
+                .expectBody()
+                .jsonPath("$.accessToken").isEqualTo("new-token")
+                .jsonPath("$.tokenType").isEqualTo("Bearer")
+                .jsonPath("$.expiresInSeconds").isEqualTo(1800);
+
+        ArgumentCaptor<TokenClaims> claims = ArgumentCaptor.forClass(TokenClaims.class);
+        verify(tokenRefreshService).reissue(claims.capture(), Mockito.eq(priorJwt));
+        assertThat(claims.getValue().username()).isEqualTo("ivanov");
+        assertThat(claims.getValue().roles()).containsExactly("ROLE_USER");
+        assertThat(claims.getValue().orgCode()).isEqualTo("ORG2");
+        assertThat(claims.getValue().orgGuid()).isEqualTo("GUID-ORG2");
+        assertThat(claims.getValue().authSource()).isEqualTo("X-Auth");
+    }
+
+    @Test
+    void putOrganizationsActive_reissueFailure_returns401() {
+        when(profileService.load("ivanov")).thenReturn(Mono.just(profile("ORG1", "ORG2")));
+        when(tokenRefreshService.reissue(any(), any())).thenReturn(Mono.empty());
+
+        client.put().uri("/user/current/profile/organizations/active")
+                .contentType(APPLICATION_JSON)
+                .bodyValue("""
+                        {"organizationCode": "ORG2", "organizationName": "ORG2"}
+                        """)
+                .exchange()
+                .expectStatus().isUnauthorized();
     }
 
     @Test
@@ -238,6 +278,8 @@ class ProfileViewControllerTest {
                 .expectStatus().isNotFound()
                 .expectBody()
                 .jsonPath("$.code").isEqualTo("ORGANIZATION_NOT_FOUND");
+
+        verify(tokenRefreshService, never()).reissue(any(), any());
     }
 
     @Test
@@ -253,6 +295,8 @@ class ProfileViewControllerTest {
                 .expectStatus().isBadRequest()
                 .expectBody()
                 .jsonPath("$.code").isEqualTo("BAD_REQUEST");
+
+        verify(tokenRefreshService, never()).reissue(any(), any());
     }
 
     @Test

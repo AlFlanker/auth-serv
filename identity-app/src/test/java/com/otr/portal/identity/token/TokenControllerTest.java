@@ -64,9 +64,11 @@ class TokenControllerTest {
                 "X-Auth", true, 1, 20, 1, 20, 5, 20, "User-Selected-OrgCode")));
         var extractor = new SsoPrincipalExtractor(configSource, ossConfigKey, authentication);
 
+        var tokenRefreshService = new TokenRefreshService(profileService, localUserService, tokenService,
+                tokenRegistry, authentication, new ActiveOrganizationClaimsResolver());
         var controller = new TokenController(
-                extractor, profileService, localUserService, tokenService,
-                tokenRegistry, jwtDecoder, authentication);
+                extractor, localUserService, tokenService, tokenRegistry, jwtDecoder, authentication,
+                tokenRefreshService);
         client = WebTestClient.bindToController(controller).build();
         when(tokenRegistry.register(any(), any())).thenReturn(Mono.empty());
     }
@@ -86,7 +88,7 @@ class TokenControllerTest {
                 .exchange()
                 .expectStatus().isOk()
                 .expectHeader().valueEquals("Cache-Control", "no-store")
-                .expectBody(TokenController.TokenView.class)
+                .expectBody(TokenRefreshService.TokenView.class)
                 .consumeWith(response ->
                         org.assertj.core.api.Assertions.assertThat(response.getResponseBody()).isNotNull())
                 .returnResult()
@@ -111,7 +113,7 @@ class TokenControllerTest {
                 .exchange()
                 .expectStatus().isOk()
                 .expectHeader().valueEquals("Cache-Control", "no-store")
-                .expectBody(TokenController.TokenView.class)
+                .expectBody(TokenRefreshService.TokenView.class)
                 .returnResult()
                 .getResponseBody();
 
@@ -143,13 +145,11 @@ class TokenControllerTest {
     }
 
     @Test
-    void exchange_reissuesTokenWithFreshRoles() {
+    void exchange_reissuesTokenWithFreshRolesAndPreservedOrganization() {
         var original = tokenService.mint(new TokenClaims(
                 "ivanov", List.of("ROLE_OLD"), "GUID-1", "ORG-1", "X-Auth")).block();
         when(tokenRegistry.isActive(any())).thenReturn(Mono.just(true));
-        when(profileService.loadWithoutCache("ivanov")).thenReturn(Mono.just(new Profile(
-                "ivanov", null, null, null, null, null, null, null, "ivanov", null, null, null,
-                List.of("ROLE_FRESH"), List.of(), "ORG-NEW", "GUID-NEW", false)));
+        when(profileService.loadWithoutCache("ivanov")).thenReturn(Mono.just(profile("ORG-1", "ORG-2")));
         when(tokenRegistry.exchange(any(), any(), any())).thenReturn(Mono.just(true));
 
         var body = client.post().uri("/api/internal/token/exchange")
@@ -157,14 +157,72 @@ class TokenControllerTest {
                 .exchange()
                 .expectStatus().isOk()
                 .expectHeader().valueEquals("Cache-Control", "no-store")
-                .expectBody(TokenController.TokenView.class)
+                .expectBody(TokenRefreshService.TokenView.class)
                 .returnResult()
                 .getResponseBody();
 
         assertThat(body).isNotNull();
         var jwt = jwtDecoder.decode(body.accessToken());
-        assertThat(jwt.getClaimAsStringList("roles")).containsExactly("ROLE_FRESH");
-        assertThat(jwt.getClaimAsString("org_code")).isEqualTo("ORG-NEW");
+        assertThat(jwt.getClaimAsString("org_code")).isEqualTo("ORG-1");
+        assertThat(jwt.getClaimAsString("org_guid")).isEqualTo("GUID-ORG-1");
+    }
+
+    @Test
+    void exchange_staleOrganizationIsDroppedFromClaims() {
+        var original = tokenService.mint(new TokenClaims(
+                "ivanov", List.of("ROLE_OLD"), "GUID-STALE", "ORG-STALE", "X-Auth")).block();
+        when(tokenRegistry.isActive(any())).thenReturn(Mono.just(true));
+        when(profileService.loadWithoutCache("ivanov")).thenReturn(Mono.just(profile("ORG-1", "ORG-2")));
+        when(tokenRegistry.exchange(any(), any(), any())).thenReturn(Mono.just(true));
+
+        var body = client.post().uri("/api/internal/token/exchange")
+                .header("Authorization", "Bearer " + original)
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(TokenRefreshService.TokenView.class)
+                .returnResult()
+                .getResponseBody();
+
+        assertThat(body).isNotNull();
+        var jwt = jwtDecoder.decode(body.accessToken());
+        assertThat(jwt.getClaimAsString("org_code")).isNull();
+    }
+
+    @Test
+    void token_bySsoHeader_withActiveOrgCookie_selectsCookieOrganization() {
+        when(profileService.loadWithoutCache("ivanov")).thenReturn(Mono.just(profile("ORG-1", "ORG-2")));
+
+        var token = client.post().uri("/api/v1/token")
+                .header("X-Auth", "ivanov")
+                .cookie("ACTIVE_ORG", "ORG-2")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(TokenRefreshService.TokenView.class)
+                .returnResult()
+                .getResponseBody();
+
+        assertThat(token).isNotNull();
+        var jwt = jwtDecoder.decode(token.accessToken());
+        assertThat(jwt.getClaimAsString("org_code")).isEqualTo("ORG-2");
+        assertThat(jwt.getClaimAsString("org_guid")).isEqualTo("GUID-ORG-2");
+    }
+
+    @Test
+    void token_bySsoHeader_multiOrgWithoutCookie_hasNoOrgClaims() {
+        when(profileService.loadWithoutCache("ivanov")).thenReturn(Mono.just(profile("ORG-1", "ORG-2")));
+
+        var token = client.post().uri("/api/v1/token")
+                .header("X-Auth", "ivanov")
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody(TokenRefreshService.TokenView.class)
+                .returnResult()
+                .getResponseBody();
+
+        assertThat(token).isNotNull();
+        var jwt = jwtDecoder.decode(token.accessToken());
+        assertThat(jwt.getClaimAsString("org_code")).isNull();
+        assertThat(jwt.getClaimAsString("org_guid")).isNull();
     }
 
     @Test
@@ -250,5 +308,15 @@ class TokenControllerTest {
         Mockito.verifyNoInteractions(localUserService);
         Mockito.verify(tokenRegistry, Mockito.never()).exchange(any(), any(), any());
         Mockito.verify(tokenRegistry, Mockito.never()).register(any(), any());
+    }
+
+    private static Profile profile(String... orgCodes) {
+        var organizations = java.util.Arrays.stream(orgCodes)
+                .map(code -> new Organization(code, code, code, "GUID-" + code,
+                        null, null, null, null, (short) 1))
+                .toList();
+        return new Profile("ivanov", null, null, null, null, null, null, null,
+                "ivanov", null, null, null,
+                List.of(), organizations, null, null, false);
     }
 }

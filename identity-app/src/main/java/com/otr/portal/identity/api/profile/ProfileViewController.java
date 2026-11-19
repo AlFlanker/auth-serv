@@ -4,9 +4,11 @@ import com.otr.portal.identity.api.profile.view.OssUserInfoView;
 import com.otr.portal.identity.api.profile.view.OssUserWorkPhoneView;
 import com.otr.portal.identity.api.profile.view.OrganizationView;
 import com.otr.portal.identity.api.profile.view.SetActiveOrganizationRequest;
+import com.otr.portal.identity.token.TokenRefreshService;
 import com.otr.portal.oss.model.Organization;
 import com.otr.portal.oss.model.Profile;
 import com.otr.portal.oss.userdetails.ProfileService;
+import com.otr.portal.token.TokenClaims;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.CacheControl;
 import org.springframework.http.HttpHeaders;
@@ -14,6 +16,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.oauth2.jwt.BadJwtException;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -44,6 +48,7 @@ public class ProfileViewController {
     private final CurrentUserResolver currentUserResolver;
     private final ActiveOrganizationResolver activeOrganizationResolver;
     private final ProfileViewMapper viewMapper;
+    private final TokenRefreshService tokenRefreshService;
 
     @GetMapping(produces = MediaType.APPLICATION_JSON_VALUE)
     public Mono<ResponseEntity<OssUserInfoView>> getUser(ServerWebExchange exchange) {
@@ -92,14 +97,38 @@ public class ProfileViewController {
     }
 
     @PutMapping(path = "/organizations/active", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public Mono<ResponseEntity<Void>> setActiveOrganization(ServerWebExchange exchange,
-                                                            @RequestBody SetActiveOrganizationRequest request) {
+    public Mono<ResponseEntity<TokenRefreshService.TokenView>> setActiveOrganization(ServerWebExchange exchange,
+                                                                                     @RequestBody SetActiveOrganizationRequest request) {
         return currentUserResolver.requireUser(exchange)
                 .flatMap(user -> profileService.load(user.login())
-                        .flatMap(profile -> selectOrganization(profile, request)))
-                .map(selected -> ResponseEntity.ok()
+                        .flatMap(profile -> selectOrganization(profile, request)
+                                .flatMap(selected -> reissueWithOrganization(exchange, user, profile, selected))));
+    }
+
+    /**
+     * Смена активной организации — редкий сценарий: токен перевыпускается с новыми
+     * claims {@code org_guid}/{@code org_code} (роли — из профиля, время входа
+     * сохраняется). Старый jti гасится в реестре. Cookie {@code ACTIVE_ORG} —
+     * переходная обратная совместимость с монолитом; portal-edge по ответу заменяет
+     * хранимый JWT (контракт катофа, см. документацию).
+     */
+    private Mono<ResponseEntity<TokenRefreshService.TokenView>> reissueWithOrganization(ServerWebExchange exchange,
+                                                                                         AuthenticatedUser user,
+                                                                                         Profile profile,
+                                                                                         Organization selected) {
+        Jwt prior = exchange.getAttribute(JwtAuthenticationWebFilter.JWT_ATTRIBUTE);
+        if (prior == null) {
+            return Mono.error(new UnauthorizedException());
+        }
+        var claims = new TokenClaims(user.login(), profile.roles(),
+                selected.orgGUID(), selected.orgSvrCode(), user.authSource());
+        return tokenRefreshService.reissue(claims, prior)
+                .switchIfEmpty(Mono.error(new UnauthorizedException()))
+                .onErrorResume(BadJwtException.class, ignored -> Mono.error(new UnauthorizedException()))
+                .map(issued -> ResponseEntity.ok()
+                        .cacheControl(CacheControl.noStore())
                         .header(HttpHeaders.SET_COOKIE, activeOrgCookie(selected).toString())
-                        .build());
+                        .body(TokenRefreshService.toView(issued)));
     }
 
     private String extractNewPhone(OssUserInfoView ossUserInfo) {

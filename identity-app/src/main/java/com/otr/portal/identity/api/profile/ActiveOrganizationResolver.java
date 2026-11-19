@@ -34,7 +34,7 @@ public class ActiveOrganizationResolver {
         if (byClaim != null) {
             return Mono.just(byClaim);
         }
-        Organization byCookie = findByCode(profile, readCookie(exchange));
+        Organization byCookie = findByCode(profile, readActiveOrgCookie(exchange));
         if (byCookie != null) {
             return Mono.just(byCookie);
         }
@@ -61,7 +61,12 @@ public class ActiveOrganizationResolver {
                 .orElse(null);
     }
 
-    private static String readCookie(ServerWebExchange exchange) {
+    /**
+     * Значение cookie {@value #ACTIVE_ORG_COOKIE} (URL-decoded), как
+     * {@code ActiveOrgResolverFilter} монолита. Используется и резолвером
+     * claims при выпуске JWT ({@code ActiveOrganizationClaimsResolver}).
+     */
+    public static String readActiveOrgCookie(ServerWebExchange exchange) {
         HttpCookie cookie = exchange.getRequest().getCookies().getFirst(ACTIVE_ORG_COOKIE);
         if (cookie == null) {
             return null;

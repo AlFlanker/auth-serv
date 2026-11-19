@@ -3,6 +3,7 @@ package com.otr.portal.identity.api.profile;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtException;
 import org.springframework.stereotype.Component;
@@ -27,6 +28,9 @@ import java.util.List;
 public class JwtAuthenticationWebFilter implements WebFilter {
 
     private static final String BEARER_PREFIX = "Bearer ";
+
+    /** Атрибут exchange с декодированным {@link Jwt} — для перевыпуска (смена активной организации). */
+    public static final String JWT_ATTRIBUTE = JwtAuthenticationWebFilter.class.getName() + ".jwt";
 
     private static final List<PathPattern> PROTECTED_PATHS = List.of(
             PathPatternParser.defaultInstance.parse("/user/current/**"),
@@ -59,6 +63,7 @@ public class JwtAuthenticationWebFilter implements WebFilter {
                 .flatMap(jwt -> {
                     exchange.getAttributes()
                             .put(CurrentUserResolver.USER_ATTRIBUTE, AuthenticatedUser.from(jwt));
+                    exchange.getAttributes().put(JWT_ATTRIBUTE, jwt);
                     return chain.filter(exchange);
                 })
                 .onErrorResume(JwtException.class, ignored -> unauthorized(exchange));

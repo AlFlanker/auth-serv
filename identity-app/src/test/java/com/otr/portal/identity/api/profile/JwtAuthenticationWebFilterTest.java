@@ -77,8 +77,10 @@ class JwtAuthenticationWebFilterTest {
                 .build());
 
         AtomicReference<AuthenticatedUser> captured = new AtomicReference<>();
+        AtomicReference<Object> capturedJwt = new AtomicReference<>();
         new JwtAuthenticationWebFilter(jwtDecoder).filter(exchange, chain -> {
             captured.set(exchange.getAttribute(CurrentUserResolver.USER_ATTRIBUTE));
+            capturedJwt.set(exchange.getAttribute(JwtAuthenticationWebFilter.JWT_ATTRIBUTE));
             return Mono.empty();
         }).block();
 
@@ -88,6 +90,7 @@ class JwtAuthenticationWebFilterTest {
         assertThat(captured.get().orgCode()).isEqualTo("ORG1");
         assertThat(captured.get().orgGuid()).isEqualTo("GUID-1");
         assertThat(captured.get().authSource()).isEqualTo("X-Auth");
+        assertThat(capturedJwt.get()).isInstanceOf(org.springframework.security.oauth2.jwt.Jwt.class);
         assertThat(exchange.getResponse().getStatusCode()).isNull();
     }
 
