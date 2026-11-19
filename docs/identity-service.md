@@ -12,7 +12,7 @@
 | Аутентификация: login, SSO; form-login админки — не прод, при переносе переводится на выпуск JWT | Верификация JWT на каждом запросе (portal-edge, по JWKS) |
 | Выдача/продление JWT, logout | Локальные URL-правила `CheckRoutesFilter` (portal-edge) |
 | Сбор профиля и ролей из ОШС/ЮСБ | Проверки доступности ресурсов СПИ/ЮСБ (nav-composer, `resource-access-support`) |
-| Активная организация, локальные админы, сертификаты | Sticky-сессии, отдача UI (portal-edge / portal-app) |
+| Активная организация, локальные админы | Sticky-сессии, отдача UI (portal-edge / portal-app) |
 
 Суть сервиса: «кто ты» — идентичность (JWT, профиль, роли), а не «что тебе доступно» и не «пускать ли по URL».
 
@@ -36,7 +36,7 @@
   - имя заголовка запоминается (`ExternalUserInfo`) и пробрасывается бэкендам — в целевой схеме это делает portal-edge из claims JWT (claim «источник аутентификации»);
 - `JWTLoginFilter` — вход по логину/паролю (POST /login); в проде не используется, в identity-service реализуется заново (см. п. 2);
 - локальные администраторы (`JdbcUserDetailsManager`, `ExtensionInMemoryUserDetailsManager`; дефолт `user/123`). formLogin админки в проде не используется; при переносе вход админа переводится на выпуск JWT (аналог `admin.security.auth-type.jwt`), а не на JSESSIONID — иначе сервис перестаёт быть stateless;
-- `PortalHttpsChannelFilter`, клиентские сертификаты (`CertificateUtils`/`CertificateUtilsImpl`).
+- `PortalHttpsChannelFilter` — канальные редиректы HTTP/HTTPS по layout-атрибутам (замена `ChannelProcessingFilter`), к клиентским сертификатам отношения не имеет; уходит с layout-правилами в portal-edge/portal-app, не в identity-service. Клиентские сертификаты (`CertificateUtils`/`CertificateUtilsImpl`) — мёртвый код, в identity-service не переносится (см. п. 6).
 
 ### 2. Выдача и жизненный цикл JWT
 
@@ -74,6 +74,7 @@
 
 - `extensions/oauth` — это OAuth 1.0a-клиент к Atlassian Jira, а не выдача токенов пользователям. Единственный потребитель — `jira-feign-client` (`JiraFeignClientFactory` → `OAuthService`). В сборку fk-portal `jira-feign-client` и `problem-report-storage-jira` не входят (в settings.gradle их нет); сам `oauth` в settings.gradle включён (строка 38), но ни один включённый модуль от него не зависит — мёртвый код. Интеграция с Jira удалена (коммит `ff6fe94f5`), код помечен устаревшим со сроком удаления 2026-09-17.
 - `extensions/authentication-ad` (SPNEGO/AD) — в settings.gradle не включён, мёртвый код.
+- клиентские сертификаты: `CertificateUtils`/`CertificateUtilsImpl` (`core/security`, пакет cert) — бин объявляется в `WebSecurityConfiguration`, но ни один компонент его не вызывает (`getCertInfo` без потребителей); `ExtensionUserDetail.certInfo` никогда не заполняется, поэтому заголовки УФОС-прокси по сертификату (`EbUIHeaderInterceptor` и др.) и сейчас не формируются. Мёртвый код, кандидат на удаление; при необходимости сертификатной аутентификации — реализация с нуля.
 
 Вывод: модули в identity-service не мигрируют и являются кандидатами на удаление. Если в будущем понадобится OAuth/OIDC — реализация заново на новом стеке (Spring Security OAuth2).
 
@@ -174,6 +175,25 @@
 
 **Локальный запуск (docker compose).** Сервис добавлен в compose-стенд портала (`solutions/fk-portal/docker-compose.yml`: сервисы `identity-service` и `jaeger`); профиль `docker` (`application-docker.yml`) подключается к уже работающим на хосте etcd/PostgreSQL через host-gateway, постоянный ключ подписи JWT монтируется с хоста (`C:\Users\AlexFlanker\AppData\Local\identity-service\keys`, по умолчанию `identity-dev-01.pem`, kid `identity-dev-01`), локальный вход `user/123` включён, трассы — все в Jaeger (UI `http://localhost:16686`). Запуск: `docker compose build identity-service` → `docker compose up -d jaeger` → `docker compose up -d --no-deps identity-service`.
 
+### 2б. Публичные профильные эндпоинты (JWT)
+
+Реализованы (19.11.2026) с контрактами монолита — после катофа portal-edge проксирует эти URL в identity-service без изменений:
+
+| Метод и путь | Контракт |
+|---|---|
+| `GET /user/current/profile` | `OSSUserInfo` `{employee, organization}`; поля — `ProfileField {value, editable}`; `phoneWorkplace.editable=true`; `Cache-Control: no-cache` |
+| `GET /user/current/profile/workphone` | рабочий телефон из источника без кэша (`loadWithoutCache`) |
+| `POST /user/current/profile` | сохранение `phoneWorkplace` (200). Обновляется только владелец JWT — логин из тела игнорируется (в монолите логин из тела управлял целью) |
+| `GET /user/current/profile/organizations` | список организаций `{organizationCode, organizationName, active}`; `active` — статус реорганизации `ACTIVE` (как в монолите) |
+| `GET/PUT /user/current/profile/organizations/active` | активная организация; PUT валидирует по списку организаций владельца и ставит cookie `ACTIVE_ORG` (`Path=/; HttpOnly; SameSite=Strict`, значение URL-encoded); неизвестный код — 404 `ORGANIZATION_NOT_FOUND` (в монолите — 500) |
+| `HEAD /currentuser` | заголовок `user` + no-cache заголовки |
+| `HEAD /admin/currentuser` | то же при `ROLE_ADMIN` в JWT, иначе 403 |
+
+- Аутентификация: `JwtAuthenticationWebFilter` на путях `/user/current/**`, `/currentuser`, `/admin/currentuser` — автономная проверка Bearer JWT по подписи и сроку (как на portal-edge, без реестра jti); логин из `sub`, роли из `roles`.
+- Активная организация: claim `org_code` → cookie `ACTIVE_ORG` → единственная организация; иначе **428** `{errorCode: "ORG_NOT_SELECTED", error}` — контракт `OrganizationGuardFilter`, UI по нему открывает модалку выбора (в монолите в этом случае был 500).
+- Локальные пользователи (auth_source=password): профильные эндпоинты — 404 `NOT_FOUND` (в монолите 200 с `null`/405); `/currentuser` работает, `/admin/currentuser` — по роли.
+- Сбои источника — 503/504 `{code,message}`, как во внутреннем API. Постоянное хранение выбора активной организации и выдача claims при выпуске/обмене — п. 2 таблицы недостающих функций.
+
 ### 3. Локальные админы и роли (PostgreSQL)
 
 - Для опционального локального входа оператор заводит пользователя с BCrypt-паролем и ролями. По умолчанию включён только SSO;
@@ -195,22 +215,21 @@
 
 Ядро для целевого контура готово: единый формат claims, JWKS с ротацией, выпуск/обмен/отзыв JWT
 (реестр в БД), сбор профиля/ролей из ОШС/ЮСБ с кэшем и `cacheHit`, внутренний API за `X-Internal-Key`,
-интеграция с монолитом за feature-toggle, локальные пользователи/роли (чтение), конфиги из etcd.
+интеграция с монолитом за feature-toggle, публичные профильные эндпоинты (`/user/current/profile*`,
+`/currentuser`, `/admin/currentuser`), локальные пользователи/роли (чтение), конфиги из etcd.
 
 До полного катофа (шаги 4–5 миграции, ADR-02) не хватает:
 
 | № | Функция | Кому и зачем |
 |---|---|---|
 | 1 | Разовый/ротируемый `AUTH_TOKEN` для админ-контура | portal-edge: проверка доступа к `/admin` в jwt-режиме вместо статического токена на JVM монолита (`TokenAuthFilter`), печатаемого в лог |
-| 2 | Публичные профильные эндпоинты `/user/current/profile` (+`/workphone`, POST кастомных полей), `/user/current/profile/organizations`, `/organizations/active`, `/currentuser`, `/admin/currentuser` | внешние URL должны остаться без изменений: их проксирует portal-edge в identity-service; без них после катофа ломаются UI профиля и выбор организации |
-| 3 | Активная организация мультиорганизационных пользователей (хранение выбора, GET/PUT active, cookie `ACTIVE_ORG`, выдача `org_guid`/`org_code` в claims) | portal-edge — заголовок «код СВР» бэкендам (`ActiveOrgHeaderEnricher`); portal-app — `/document-link` (org-GUID для УФОС) и обогащение тикетов (`ELKProblemReportEnricher`) |
-| 4 | Админ-API локальных пользователей и ролей: CRUD пользователей (`UsersController`/`UserService`), ролей и назначений (`RolesController`/`UserRoleService`) | portal-app: админ-UI остаётся в Common, данные — в identity-service; сейчас есть только bootstrap-пользователи и чтение ролей (`GET /roles`, `/roles/{id}`) |
-| 5 | Канал аудита входов/выпуска/обмена/отзыва токенов (kafka/rabbit/API) | portal-app (server-audit, `AdminAuditEventMapper`): журнал входов продолжает работать после выноса аутентификации |
-| 6 | SSO-logout контур: `PoibLogoutUrlResolver`, `SsoLogoutUrlResolver` (`/prepare-logout`, `/end-logout`), `UfosLogoutHandler` (logout УФОС, из `ufos-support`) | внешние `/login`, `/logout`, `/prepare-logout`, `/end-logout` остаются без изменений; сейчас есть только отзыв JWT — без резолверов завершение SSO-сессии ломается |
-| 7 | Клиентские сертификаты (`CertificateUtils`/`CertificateUtilsImpl`, `PortalHttpsChannelFilter`) | контур с сертификатной аутентификацией — «сертификаты» в зоне identity-service по ADR-02 |
-| 8 | Харденинг: mTLS внутреннего API и rate-limiting на `/api/v1/token` | прод-эксплуатация: потребителей внутреннего API становится несколько (edge, portal-app, nav-composer) — общий ключ слабая защита; `/api/v1/token` — точка перебора |
-| 9 | Распределённый кэш профилей (Redis/gRPC, ADR-01) поверх локального Caffeine | несколько реплик: общий кэш снимает рассинхрон профилей/ролей между репликами и лишнюю нагрузку на ОШС/ЮСБ; сейчас сквозная инвалидация — ручная (`cache/invalidate`) |
-| 10 | Переработка JWT у nav-composer (вне identity-service, но блокирует единый формат) | nav-composer пока принимает отладочный HMAC-формат (`NavComposerJwtFactory`: `username`, `roles`, `requestScheme`); целевой — верификация по JWKS identity-service или приём проверенного JWT от edge, иначе единый формат claims не доходит до проверок доступа |
+| 2 | Активная организация мультиорганизационных пользователей: постоянное хранение выбора и выдача `org_guid`/`org_code` в claims при выпуске/обмене JWT | portal-edge — заголовок «код СВР» бэкендам (`ActiveOrgHeaderEnricher`); portal-app — `/document-link` (org-GUID для УФОС) и обогащение тикетов (`ELKProblemReportEnricher`). Эндпоинты GET/PUT active и cookie `ACTIVE_ORG` уже реализованы (см. «Возможности сервиса», п. 2б) — выбор пока хранится в cookie клиента, а не на сервере |
+| 3 | Админ-API локальных пользователей и ролей: CRUD пользователей (`UsersController`/`UserService`), ролей и назначений (`RolesController`/`UserRoleService`) | portal-app: админ-UI остаётся в Common, данные — в identity-service; сейчас есть только bootstrap-пользователи и чтение ролей (`GET /roles`, `/roles/{id}`) |
+| 4 | Канал аудита входов/выпуска/обмена/отзыва токенов (kafka/rabbit/API) | portal-app (server-audit, `AdminAuditEventMapper`): журнал входов продолжает работать после выноса аутентификации |
+| 5 | SSO-logout контур: `PoibLogoutUrlResolver`, `SsoLogoutUrlResolver` (`/prepare-logout`, `/end-logout`), `UfosLogoutHandler` (logout УФОС, из `ufos-support`) | внешние `/login`, `/logout`, `/prepare-logout`, `/end-logout` остаются без изменений; сейчас есть только отзыв JWT — без резолверов завершение SSO-сессии ломается |
+| 6 | Харденинг: mTLS внутреннего API и rate-limiting на `/api/v1/token` | прод-эксплуатация: потребителей внутреннего API становится несколько (edge, portal-app, nav-composer) — общий ключ слабая защита; `/api/v1/token` — точка перебора |
+| 7 | Распределённый кэш профилей (Redis/gRPC, ADR-01) поверх локального Caffeine | несколько реплик: общий кэш снимает рассинхрон профилей/ролей между репликами и лишнюю нагрузку на ОШС/ЮСБ; сейчас сквозная инвалидация — ручная (`cache/invalidate`) |
+| 8 | Переработка JWT у nav-composer (вне identity-service, но блокирует единый формат) | nav-composer пока принимает отладочный HMAC-формат (`NavComposerJwtFactory`: `username`, `roles`, `requestScheme`); целевой — верификация по JWKS identity-service или приём проверенного JWT от edge, иначе единый формат claims не доходит до проверок доступа |
 
 Не входят в identity-service и уходят в другие контуры (по ADR-02): локальные URL-правила `CheckRoutesFilter`
 (portal-edge), проверки доступности ресурсов СПИ/ЮСБ (nav-composer), sticky-сессии и отдача UI (portal-edge/portal-app).
@@ -218,6 +237,6 @@
 ### Осознанные ограничения (что пока НЕ умеет)
 
 - нет rate-limiting на `/api/v1/token`; внутренний API защищён общим ключом (мTLS позже);
-- нет хранения выбранной организации для мультиорганизационных пользователей (в токен попадает только автовыбранная единственная);
-- нет публичных профильных эндпоинтов (`/user/current/profile*`) и интеграции с монолитом через feature-toggle — следующий шаг;
-- не прогнан против реальных ОШС/ЮСБ в dev-контуре (тесты — WireMock/моки); Docker-образ и CI подготовлены, но не запускались.
+- выбор активной организации мультиорганизационных пользователей хранится только в cookie клиента (`ACTIVE_ORG`): нет постоянного серверного хранения и выдачи `org_guid`/`org_code` в claims при выпуске/обмене (п. 2 таблицы недостающих функций);
+- интеграция с монолитом через feature-toggle реализована, но на стендах переключатель ещё не включён;
+- не прогнан против реальных ОШС/ЮСБ в dev-контуре (тесты — WireMock/моки); Docker-образ собран и проверен локально в docker compose, на стендах не развёрнут.
